@@ -1,3 +1,5 @@
+""" This was just a test using flask. Actual API is running on FastAPI which is part of `postApi.py` """
+
 from threading import Thread
 
 from flask import Flask, request, jsonify

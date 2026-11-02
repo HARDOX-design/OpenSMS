@@ -13,7 +13,7 @@ from pydantic import BaseModel
 import uvicorn
 
 # local imports
-from services.smsApi import send_sms, clean_and_validate_phone
+from services.smsApi import SmsCrossPlatform, clean_and_validate_phone
 from services.logSvc import LogService
 from services.config import app_name
 
@@ -30,6 +30,7 @@ except ImportError:
 
 ## global vars / obj
 logger = None
+sms_api = SmsCrossPlatform()
 
 ## OS specific setups
 
@@ -237,7 +238,7 @@ async def process_sms_req(
             detail="Invalid phone number",
         )
 
-    stat = send_sms(valid_phone, item.text)
+    stat = sms_api.send_sms(valid_phone, item.text)
     if stat:
         print(f"SMS dispatched to: {valid_phone}")
         log_activities(f"SMS dispatched to: {valid_phone}")

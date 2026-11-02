@@ -158,6 +158,7 @@ class OpenSmsApp(MDApp):
                 print(f"Error while starting android service: {e}")
         # non android platforms
         else:
+            self.service_stat = True
             self.internal_storage = get_user_data_dir(self.config_template["app"])
             self.config_dir = os.path.join(self.internal_storage, 'config')
             os.makedirs(self.config_dir, exist_ok=True)
@@ -215,14 +216,15 @@ class OpenSmsApp(MDApp):
             return False
 
     def start_service(self):
-        PythonActivity = autoclass('org.kivy.android.PythonActivity')
-        mActivity = PythonActivity.mActivity
-        service = autoclass('in.daslearning.opensms.ServiceOpensmssvc')
-        #argument = ''
-        argument = os.environ.get('PYTHON_SERVICE_ARGUMENT', '')
-        print(f"PYTHON_SERVICE_ARGUMENT: {argument}")
-        #service.start(mActivity, argument)
-        service.start(mActivity, 'icon', 'OpenSMS API', 'Service Running' , argument)
+        if platform == "android":
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            mActivity = PythonActivity.mActivity
+            service = autoclass('in.daslearning.opensms.ServiceOpensmssvc')
+            #argument = ''
+            argument = os.environ.get('PYTHON_SERVICE_ARGUMENT', '')
+            print(f"PYTHON_SERVICE_ARGUMENT: {argument}")
+            #service.start(mActivity, argument)
+            service.start(mActivity, 'icon', 'OpenSMS API', 'Service Running' , argument)
         self.service_stat = True
 
     def stop_service(self):

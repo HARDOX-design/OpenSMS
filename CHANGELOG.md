@@ -9,7 +9,7 @@
 
 ### 0.2.1
 - Fixing permission requirement as per Android version.
-- Movig from DATA_SYNC to SPECIAL_USE service type.
+- Moving from DATA_SYNC to SPECIAL_USE service type.
 - A single config source for the entire app.
 
 ### 0.2.0
