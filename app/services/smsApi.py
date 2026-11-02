@@ -53,7 +53,7 @@ class SmsCrossPlatform:
     def __init__(
             self, 
             serial_port: str | None = None,
-            baud_rate: int | None = None,
+            baud_rate: int | None = 115200,
             timeout: int = 3,
             write_timeout: int = 5
         ):
@@ -64,6 +64,7 @@ class SmsCrossPlatform:
         if platform != "android":
             if serial_port and baud_rate:
                 try:
+                    # python3 -m serial.tools.list_ports -v
                     self.serial_conn = serial.Serial(
                         port=serial_port,
                         baudrate=baud_rate,
@@ -74,9 +75,12 @@ class SmsCrossPlatform:
                     self.serial_conn.reset_input_buffer()
                     init_resp = self.send_at_command("AT", "OK")
                     sms_text_mode = self.send_at_command("AT+CMGF=1", "OK")
-                    if "OK" in init_resp and "OK" in sms_text_mode:
-                        self.serial_ok = True
-                        print("Seiral GSM Module is initialized successfully.")
+                    sms_gsm_set = self.send_at_command('AT+CSCS="GSM"', "OK")
+                    if "OK" in init_resp \
+                        and "OK" in sms_text_mode \
+                        and "OK"in sms_gsm_set:
+                            self.serial_ok = True
+                            print("Seiral GSM Module is initialized successfully.")
                 except Exception as e:
                     print(f"Error while connecting serial port: {e}")
                     self.serial_conn = None
@@ -106,23 +110,28 @@ class SmsCrossPlatform:
         """
         response = None
         if self.serial_conn:
-            self.serial_conn.reset_input_buffer()
-            at_cmd = f"{at_cmd}\r\n"
+            #self.serial_conn.reset_input_buffer()
+            at_cmd = f'{at_cmd}\r\n'
             self.serial_conn.write(at_cmd.encode(encoding="utf-8"))
             response = self.read_response(exp_resp, self.timeout)
+            print(response)
         return response
 
     def send_serial_sms(self, phone:str, msg:str):
         stat = False
-        command = f'AT+CMGS="{phone}"'.encode(encoding="utf-8")
+        command = f'AT+CMGS="{phone}"'
         set_phone_cmd = self.send_at_command(command, ">")
+        print(set_phone_cmd)
         if ">" in set_phone_cmd:
             sms_cmd = f"{msg}\r".encode(encoding="utf-8") + b"\x1A" # Ctrl+Z i.e. chr(26)
             self.serial_conn.write(sms_cmd)
+            time.sleep(0.2)
             sms_result = self.read_response("OK", 10)
+            print(sms_result)
             if "+CMGS:" in sms_result and "OK" in sms_result:
                 print(f"SMS sent from modem with response: {sms_result}")
                 stat = True
+            self.serial_conn.flush()
         return stat
 
     def send_sms(self, phone:str, msg:str) -> bool:

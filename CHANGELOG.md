@@ -2,6 +2,9 @@
 
 ## Changes
 
+### 1.0.0
+- Adding Desktop support via [EC200U Module](https://www.quectel.com/product/lte-ec200u-series/) and technically should work with other such modules via the `AT` commands.
+
 ### 0.3.0
 - Service type is sticky now, should restart automatically unless stopped. [android]
 - Service should run even when app is closed. [android]

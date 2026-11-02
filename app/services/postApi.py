@@ -30,23 +30,38 @@ except ImportError:
 
 ## global vars / obj
 logger = None
-sms_api = SmsCrossPlatform()
 
 ## OS specific setups
 
 # for android
 if platform == "android":
+    sms_api = SmsCrossPlatform()
     from android.storage import app_storage_path
     from jnius import autoclass
     base_path = app_storage_path()
 #for other platforms like windows or linux
 else:
+    sms_api = SmsCrossPlatform()
     from services.pathMgr import get_user_data_dir
     base_path = get_user_data_dir(app_name)
 
 config_dir = join(base_path, 'config')
 
 ## Functions
+
+def set_serial_port(
+    port:str, 
+    baud_rate: int | None = 115200,
+    timeout: int = 3,
+    write_timeout: int = 5
+):
+    global sms_api
+    sms_api = SmsCrossPlatform(
+        port,
+        baud_rate,
+        timeout,
+        write_timeout
+    )
 
 def set_api_logger(log_obj:LogService):
     global logger
