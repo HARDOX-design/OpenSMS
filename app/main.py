@@ -57,6 +57,7 @@ if platform == "android":
 else:
     from services.appSvc import app_service_thread
     from services.pathMgr import get_user_data_dir
+    from services.serialMgr import get_com_ports
 
 # Local classes
 class BaseMDNavigationItem(MDNavigationItem):
@@ -111,6 +112,8 @@ class OpenSmsApp(MDApp):
         self.req_template = {
             "port": 9292,
             "server": "stop",
+            "serial_port": "",
+            "baudrate": 115200,
         }
 
     def build(self):

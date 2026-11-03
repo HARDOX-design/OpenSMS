@@ -17,6 +17,10 @@ def get_user_data_dir(app_name: str) -> Path:
         else:
             data_dir = home / "AppData" / "Local" / app_name
 
+    elif sys.platform == "darwin":
+        # macOS standard: ~/Library/Application Support
+        data_dir = home / "Library" / "Application Support" / app_name
+
     else:
         # Linux / Unix standard: XDG_DATA_HOME (or fallback to ~/.local/share)
         xdg_data = os.environ.get("XDG_DATA_HOME")

@@ -21,6 +21,7 @@ except ImportError:
 # local imports
 from services.postApi import PosiApiServer, set_api_logger
 from services.logSvc import LogService
+from services.smsApi import SmsCrossPlatform
 from services.config import app_name
 
 # global vars
@@ -30,6 +31,7 @@ resp_template = {
 req_data = {}
 api_started = False
 log_obj = LogService(app_name, platform)
+sms_mgr = SmsCrossPlatform()
 
 running = True
 def request_stop(signum=None, frame=None):
