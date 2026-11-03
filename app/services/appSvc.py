@@ -19,9 +19,8 @@ except ImportError:
         platform = "unknown"
 
 # local imports
-from services.postApi import PosiApiServer, set_api_logger
+from services.postApi import PosiApiServer, set_api_logger, set_serial_port
 from services.logSvc import LogService
-from services.smsApi import SmsCrossPlatform
 from services.config import app_name
 
 # global vars
@@ -32,8 +31,9 @@ resp_template = {
 }
 req_data = {}
 api_started = False
+serial_started = False
+serial_mgr = None
 log_obj = LogService(app_name, platform)
-sms_mgr = SmsCrossPlatform()
 
 running = True
 def request_stop(signum=None, frame=None):
@@ -55,6 +55,7 @@ if platform == "android":
 #for other platforms like windows or linux
 else:
     from services.pathMgr import get_user_data_dir
+    from services.serialMgr import SerialConDesktop
     base_path = get_user_data_dir(app_name)
 
 config_dir = join(base_path, 'config')
@@ -101,6 +102,30 @@ def api_server_control(api_stat: str):
         resp_template["server"] = "started"
     Thread(target=write_resp, daemon=True).start()
 
+def serial_conn_control(cmd:str):
+    global serial_started
+    global serial_mgr
+
+    if not serial_mgr:
+        serial_mgr = SerialConDesktop()
+
+    if serial_mgr:
+        if cmd == "start":
+            port = req_data.get("serial_port", None)
+            baud = req_data.get("baudrate", 115200)
+            if port:
+                serial_started, provider = set_serial_port(
+                    port=port,
+                    baud_rate=baud
+                )
+                if serial_started:
+                    resp_template["serial"] = "ok"
+                    resp_template["provider"] = provider
+        elif cmd == "stop":
+            pass # To be implemented later
+        Thread(target=write_resp, daemon=True).start()
+
+
 def app_service_thread():
     """
     The main service thready runs forever till the app is running & performs the operations.
@@ -109,19 +134,26 @@ def app_service_thread():
     global api_started
 
     write_resp() # blank the old file
-    #api_server_control("start") # api server starts automatically
 
     # keep alive the service & check for requests
     try:
         while running:
             read_req_file()
 
-            #handle api server
+            # handle api server
             server_stat = req_data.get("server", "")
             if not api_started and server_stat == "start":
                 api_server_control("start")
             elif api_started and server_stat == "stop":
                 api_server_control("stop")
+
+            # handle serial request
+            if platform != "android":
+                serial_req = req_data.get("serial_port", "none")
+                if not serial_started and serial_req != "none":
+                    serial_conn_control("start")
+                elif serial_started and serial_req == "none":
+                    serial_conn_control("stop")
 
             # put a sleep
             time.sleep(0.2)

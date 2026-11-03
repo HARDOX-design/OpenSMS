@@ -55,6 +55,8 @@ def set_serial_port(
     timeout: int = 3,
     write_timeout: int = 5
 ):
+    set_ok = False
+    network_provider = "none"
     if platform != "android":
         set_ok = serial_mgr.initialize_gsm_module(
             port,
@@ -62,8 +64,10 @@ def set_serial_port(
             timeout,
             write_timeout
         )
+        network_provider = serial_mgr.get_net_operator()
         if set_ok:
             sms_api.set_serial_connection(serial_mgr)
+    return set_ok, network_provider
 
 def set_api_logger(log_obj:LogService):
     global logger

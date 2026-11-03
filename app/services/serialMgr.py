@@ -123,8 +123,16 @@ class SerialConDesktop:
         resp = self.send_at_command("AT+COPS?", "OK")
         if resp:
             try:
-                parts = resp.split[","]
+                parts = resp.split(",")
                 op_name = parts[2].replace('"', '')
             except Exception as e:
                 print(f"Error while getting network operator: {e}")
         return op_name
+
+    def stop_gsm_module(self):
+        if self.serial_conn:
+            try:
+                self.serial_conn.close()
+            except Exception as e:
+                print(f"Failed to close serial connection: {e}")
+            self.serial_conn = None
