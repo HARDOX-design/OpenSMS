@@ -112,7 +112,7 @@ class OpenSmsApp(MDApp):
         self.req_template = {
             "port": 9292,
             "server": "stop",
-            "serial_port": "",
+            "serial_port": "none",
             "baudrate": 115200,
         }
 

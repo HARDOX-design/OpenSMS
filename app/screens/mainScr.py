@@ -66,8 +66,7 @@ Builder.load_string('''
 
             MDCard:
                 orientation: "vertical"
-                size_hint_y: None
-                height: dp(192)
+                adaptive_height: True
                 padding: dp(16)
                 spacing: dp(8)
                 radius: [24, 24, 24, 24]

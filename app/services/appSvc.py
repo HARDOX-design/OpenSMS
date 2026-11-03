@@ -27,6 +27,8 @@ from services.config import app_name
 # global vars
 resp_template = {
     "server": "none",
+    "serial": "none",
+    "provider": "none",
 }
 req_data = {}
 api_started = False

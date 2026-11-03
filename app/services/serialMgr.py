@@ -117,3 +117,14 @@ class SerialConDesktop:
             self.serial_conn.flush()
         return stat
 
+    def get_net_operator(self) -> str:
+        """ Get the name of the Network operator """
+        op_name = None
+        resp = self.send_at_command("AT+COPS?", "OK")
+        if resp:
+            try:
+                parts = resp.split[","]
+                op_name = parts[2].replace('"', '')
+            except Exception as e:
+                print(f"Error while getting network operator: {e}")
+        return op_name
