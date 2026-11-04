@@ -1,12 +1,14 @@
 """ OpenSMS - CLI: Only works on Desktop platforms """
 
 import os
-os.environ["KIVY_NO_ARGS"] = "1"
+os.environ["KIVY_NO_ARGS"] = "1" # don't use kivy args
 
 import sys
 import argparse
-from threading import Thread
+from threading import Thread, Event
 import time
+import signal
+import subprocess
 
 # local imports
 from services.postApi import PosiApiServer, set_api_logger, set_serial_port
@@ -34,6 +36,37 @@ def logger(message:str):
         },
         daemon=True
     ).start()
+
+def start_background(serial, baud, host, port):
+    script = os.path.abspath(__file__)
+
+    cmd = [
+        sys.executable,
+        script,
+        "run",
+        "--serial", serial,
+        "--baud", baud,
+        "--host", host,
+        "--port", port
+    ]
+
+    kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True
+    }
+
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP |
+            subprocess.DETACHED_PROCESS
+        )
+    else:
+        kwargs["start_new_session"] = True
+
+    process = subprocess.Popen(cmd, **kwargs)
+    print(f"OpenSMS started in background. PID: {process.pid}")
 
 # classes
 
@@ -134,6 +167,13 @@ if __name__ == "__main__":
         default=9292,
         help="Port number for API server, Default: 9292"
     )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=["start", "run"],
+        default="run",
+        help="start: background service, run: foreground service"
+    )
 
     args = parser.parse_args()
 
@@ -145,13 +185,36 @@ if __name__ == "__main__":
     host = args.host if args.host else '0.0.0.0'
     port = args.port if args.port else 9292
 
+    # background start
+    if args.command == "start":
+        start_background(serial, baud, host, port)
+        sys.exit(0)
+
+    # foreground process
     sms_mgr = OpenSmsCliCls()
     serial_ok = sms_mgr.start_serial(serial, baud)
-    if not serial_ok:
-        raise RuntimeError(f"Could not start the serial modem on: {serial}")
+    #if not serial_ok:
+    #    raise RuntimeError(f"Could not start the serial modem on: {serial}")
 
     sms_mgr.start_api_server(host, port)
+
     # Keep alive the service
-    sms_mgr.command_loop()
+    #sms_mgr.command_loop()
+
+    # Main process stays alive
+    stop_event = Event()
+    def shutdown_handler(signum, frame):
+        stop_event.set()
+    signal.signal(signal.SIGTERM, shutdown_handler)
+    signal.signal(signal.SIGINT, shutdown_handler)
+
+    try:
+        print("OpenSMS service running...")
+        stop_event.wait()
+
+    finally:
+        print("Stopping OpenSMS...")
+        sms_mgr.stop_api_server()
+        print("OpenSMS stopped.")
 
 # End
