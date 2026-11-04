@@ -146,7 +146,6 @@ if __name__ == "__main__":
     parser.add_argument(
         '--serial',
         type=str,
-        required=True,
         help="Serial port. Ex: `/dev/ttyUSB0` on Linux or `COM1` on Windows."
     )
     parser.add_argument(
@@ -170,15 +169,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["start", "run"],
+        choices=["start", "run", "interactive"],
         default="run",
-        help="start: background service, run: foreground service"
+        help="start: background service, run: foreground service, interactive: query based operations"
     )
 
     args = parser.parse_args()
 
     if not args.serial:
-        raise RuntimeError("Serial port is needed")
+        raise RuntimeError("Serial port is needed, user --serial or try --help")
 
     serial = args.serial
     baud = args.baud if args.baud else 115200
@@ -190,31 +189,43 @@ if __name__ == "__main__":
         start_background(serial, baud, host, port)
         sys.exit(0)
 
-    # foreground process
     sms_mgr = OpenSmsCliCls()
-    serial_ok = sms_mgr.start_serial(serial, baud)
-    #if not serial_ok:
-    #    raise RuntimeError(f"Could not start the serial modem on: {serial}")
 
-    sms_mgr.start_api_server(host, port)
+    if args.command == "run":
+        # foreground process
+        serial_ok = sms_mgr.start_serial(serial, baud)
+        #if not serial_ok:
+        #    raise RuntimeError(f"Could not start the serial modem on: {serial}")
 
-    # Keep alive the service
-    #sms_mgr.command_loop()
+        sms_mgr.start_api_server(host, port)
 
-    # Main process stays alive
-    stop_event = Event()
-    def shutdown_handler(signum, frame):
-        stop_event.set()
-    signal.signal(signal.SIGTERM, shutdown_handler)
-    signal.signal(signal.SIGINT, shutdown_handler)
+        # Keep alive the service
+        #sms_mgr.command_loop()
 
-    try:
-        print("OpenSMS service running...")
-        stop_event.wait()
+        # Main process stays alive
+        stop_event = Event()
+        def shutdown_handler(signum, frame):
+            stop_event.set()
+        signal.signal(signal.SIGTERM, shutdown_handler)
+        signal.signal(signal.SIGINT, shutdown_handler)
 
-    finally:
-        print("Stopping OpenSMS...")
-        sms_mgr.stop_api_server()
-        print("OpenSMS stopped.")
+        try:
+            print("OpenSMS service running...")
+            stop_event.wait()
+
+        finally:
+            print("Stopping OpenSMS...")
+            sms_mgr.stop_api_server()
+            print("OpenSMS stopped.")
+
+    elif args.command == "interactive":
+        # interactive operations
+        serial_ok = sms_mgr.start_serial(serial, baud)
+        #if not serial_ok:
+        #    raise RuntimeError(f"Could not start the serial modem on: {serial}")
+
+        sms_mgr.start_api_server(host, port)
+        # Keep alive the service
+        sms_mgr.command_loop()
 
 # End

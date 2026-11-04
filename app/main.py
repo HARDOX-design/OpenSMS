@@ -132,6 +132,7 @@ class OpenSmsApp(MDApp):
         # for android
         if platform == "android":
             file_m_height = 0.9
+            self.root.ids.home_scr.ids.serial_card.opacity = 0
             from android.storage import app_storage_path
             sdk_version = 33
             try:

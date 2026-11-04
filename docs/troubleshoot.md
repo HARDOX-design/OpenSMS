@@ -20,3 +20,9 @@ adb shell ps | grep opensms
 
 adb logcat --pid=1234 # change the pid as shown above
 ```
+
+## Linux Dependencies for build
+```bash
+sudo apt install libcairo2-dev pkg-config python3-dev
+sudo apt-get install libjpeg-dev zlib1g-dev
+```
