@@ -29,10 +29,10 @@ jobs:
         id: 'git-checkout'
         uses: "actions/checkout@v4"
 
-      - name: Install Dependencies
-        id: 'install_prereq'
-        run: |
-          # <command>
+      #- name: Install Dependencies
+      #  id: 'install_prereq'
+      #  run: |
+      #    # <command>
 
       - name: Set version
         id: 'set_version'
@@ -57,6 +57,13 @@ jobs:
           python-version: '3.13'
           cache: 'pip'
 
+      - name: Check Windows graphics environment
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_VideoController |
+            Format-Table Name, DriverVersion, Status
+          python -c "import os; os.environ['KIVY_GL_BACKEND']='sdl2'; from kivy.core.window import Window; print(Window)"
+
       - name: Pip Install n Checks
         id: 'pip_install'
         run: |
@@ -69,8 +76,15 @@ jobs:
         id: 'py_cli'
         run: |
           cd app
-          pyinstaller desktopCli.spec
-          pyinstaller desktopGui.spec
+          pyinstaller --clean --noconfirm desktopCli.spec
+
+      - name: PyInstaller GUI
+        id: 'py_gui'
+        shell: pwsh
+        run: |
+          cd app
+          $env:KIVY_GL_BACKEND = "sdl2"
+          pyinstaller --clean --noconfirm desktopGui.spec
 
       #- name: Upload artifact
       #  uses: actions/upload-pages-artifact@v3
