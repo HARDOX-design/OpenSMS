@@ -1,0 +1,55 @@
+# Generates OpenSms executables for Linux
+
+name: 'Linux Executables'
+
+on:
+
+  push:
+    branches:
+      - 'develop' # will change to main
+    paths:
+      - 'app/**'
+
+# Top-level permissions
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  linux_cli:
+    name: 'Main Job'
+    runs-on: 'ubuntu-latest'
+
+    steps:
+
+      - name: GIT Checkout
+        id: 'git-checkout'
+        uses: "actions/checkout@v4"
+
+      - name: Set version
+        id: 'set_version'
+        shell: python
+        run: |
+          import os
+          from app.services.config import __version__ as as app_version
+          # Write to GITHUB_OUTPUT
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"app_version={app_version}\n")
+
+      - name: Check app version
+        run: |
+          echo "App version is: ${{ steps.set_version.outputs.app_version }}"
+
+      - name: PyInstaller CLI
+        id: 'py_cli'
+        run: |
+          cd app/
+          python -m venv .env
+          source .env/bin/activate
+          pip install -r req_desktop.txt
+
+      #- name: Upload artifact
+      #  uses: actions/upload-pages-artifact@v3
+      #  with:
+      #    path: './flasher'
+
