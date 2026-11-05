@@ -19,6 +19,9 @@ jobs:
   linux_cli:
     name: 'Main Job'
     runs-on: 'ubuntu-latest'
+    permissions:
+      contents: write       # 👈 Needed to create/update the release and tags
+      pull-requests: read
 
     steps:
 
