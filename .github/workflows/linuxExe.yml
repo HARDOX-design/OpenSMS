@@ -26,6 +26,12 @@ jobs:
         id: 'git-checkout'
         uses: "actions/checkout@v4"
 
+      - name: Install Dependencies
+        id: 'install_prereq'
+        run: |
+          #sudo apt update
+          sudo apt install -y libcairo2-dev pkg-config libjpeg-dev zlib1g-dev
+
       - name: Set version
         id: 'set_version'
         shell: python
@@ -37,7 +43,7 @@ jobs:
           from services.config import __version__ as app_version
           # Write to GITHUB_OUTPUT
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-            f.write(f"app_version={app_version}\n")
+            f.write(f"app_version=v{app_version}\n")
 
       - name: Check app version
         run: |
@@ -50,9 +56,22 @@ jobs:
           python -m venv .env
           source .env/bin/activate
           pip install -r req_desktop.txt
+          pyinstaller desktopCli.spec
+          pyinstaller desktopGui.spec
 
       #- name: Upload artifact
       #  uses: actions/upload-pages-artifact@v3
       #  with:
       #    path: './flasher'
 
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.set_version.outputs.app_version }}
+          name: ${{ steps.set_version.outputs.app_version }}
+          draft: false
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            app/dist/openSmsCli
+            app/dist/OpenSmsApp
