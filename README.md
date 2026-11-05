@@ -53,6 +53,23 @@ sudo systemctl disable ModemManager # disbable it permanently
 
 #### >_ CLI Mode (Recommended)
 You can run any of the following modes. First clone the repo and install the modules.
+
+- Download `openSmsCli` for Linux or `openSmsCli.exe` on Windows from the [Releases](https://github.com/daslearning-org/OpenSMS/releases). Then run below commands. You may run via Python as well.
+
+```bash
+# On Linux
+chmod +x openSmsCli
+./openSmsCli --help # get arguments detail
+./openSmsCli interactive --serial /dev/ttyUSB0
+```
+
+```powershell
+# On Windows
+.\openSmsCli.exe --help
+.\openSmsCli.exe interactive --serial COM1
+```
+
+- Or run it via Python
 ```bash
 git clone https://github.com/daslearning-org/OpenSMS.git
 cd OpenSMS/app
@@ -86,7 +103,9 @@ python openSmsCli.py start --serial /dev/ttyUSB0
 #### UI Mode
 We can also use the graphical app (same as android). Executable binaries will also be available in [Releases](https://github.com/daslearning-org/OpenSMS/releases) if you do not wish to avoid managing Python.
 
-- Run the UI
+- Dedicated App based on OS: You will get `OpenSmsApp` for Linux and `OpenSmsApp.exe` for Windows. Just run it. You can also run it via Python as shown below.
+
+- Run the UI via Python
 ```bash
 git clone https://github.com/daslearning-org/OpenSMS.git
 cd OpenSMS/app
