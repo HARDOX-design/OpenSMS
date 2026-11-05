@@ -1,16 +1,21 @@
 import re
 import time
 
-try:
-    from kivy.utils import platform
-except ImportError:
-    import sys
-    if sys.platform.startswith("win"):
-        platform = "win"
-    elif sys.platform.startswith("linux"):
-        platform = "linux"
-    else:
-        platform = "unknown"
+from services.pathMgr import get_os_platform
+
+#try:
+#    from kivy.utils import platform
+#except ImportError:
+#    import sys
+#    if sys.platform.startswith("win"):
+#        platform = "win"
+#    elif sys.platform.startswith("linux"):
+#        platform = "linux"
+#    else:
+#        platform = "unknown"
+
+# Global vars
+platform = get_os_platform()
 
 ## OS specific setups
 # for android

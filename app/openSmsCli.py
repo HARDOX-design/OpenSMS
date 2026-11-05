@@ -11,17 +11,13 @@ import signal
 import subprocess
 
 # local imports
+from services.pathMgr import get_os_platform
 from services.postApi import PosiApiServer, set_api_logger, set_serial_port
 from services.logSvc import LogService
 from services.config import app_name
 
 # OS specific
-if sys.platform.startswith("win"):
-    platform = "win"
-elif sys.platform.startswith("linux"):
-    platform = "linux"
-else:
-    platform = "unknown"
+platform = get_os_platform()
 
 # Global vars / obj
 log_obj = LogService(app_name, platform)

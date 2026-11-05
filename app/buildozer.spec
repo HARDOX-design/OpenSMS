@@ -24,7 +24,7 @@ source.include_exts = py,png,jpg,kv,atlas,json,java,ttf
 #source.include_patterns = assets/*,images/*.png
 
 # (list) Source files to exclude (leave empty to not exclude anything)
-#source.exclude_exts = spec
+source.exclude_exts = spec
 
 # (list) List of directory to exclude (leave empty to not exclude anything)
 source.exclude_dirs = tests, logs, bin, venv, build, dist, patches, .venv, venv, env, .env, p4a_local_recipes, hookers, __pycache__, config

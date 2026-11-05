@@ -13,22 +13,24 @@ from pydantic import BaseModel
 import uvicorn
 
 # local imports
+from services.pathMgr import get_os_platform
 from services.smsApi import SmsCrossPlatform, clean_and_validate_phone
 from services.logSvc import LogService
 from services.config import app_name
 
 # OS specific
-try:
-    from kivy.utils import platform
-except ImportError:
-    if sys.platform.startswith("win"):
-        platform = "win"
-    elif sys.platform.startswith("linux"):
-        platform = "linux"
-    else:
-        platform = "unknown"
+#try:
+#    from kivy.utils import platform
+#except ImportError:
+#    if sys.platform.startswith("win"):
+#        platform = "win"
+#    elif sys.platform.startswith("linux"):
+#        platform = "linux"
+#    else:
+#        platform = "unknown"
 
 ## global vars / obj
+platform = get_os_platform()
 logger = None
 sms_api = SmsCrossPlatform()
 

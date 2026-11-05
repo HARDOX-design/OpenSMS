@@ -2,14 +2,36 @@ import os
 import sys
 from pathlib import Path
 
+def get_os_platform() -> str:
+    """
+    Get OS platform: android / win / linux / unknown
+    """
+    kivy_build = os.environ.get('KIVY_BUILD', '')
+    if kivy_build in {'android', 'ios'}:
+        return kivy_build
+    elif 'P4A_BOOTSTRAP' in os.environ:
+        return 'android'
+    elif 'ANDROID_ARGUMENT' in os.environ:
+        return 'android'
+    elif sys.platform in ('win32', 'cygwin'):
+        return 'win'
+    elif sys.platform == 'darwin':
+        return 'macosx'
+    elif sys.platform.startswith('linux'):
+        return 'linux'
+    elif sys.platform.startswith('freebsd'):
+        return 'linux'
+    return 'unknown'
+
 def get_user_data_dir(app_name: str) -> Path:
     """
-    Returns a safe, user-specific data directory for Linux and Windows.
+    Returns a safe, user-specific data directory for Linux, Windows & MAC.
     Creates the directory if it does not already exist.
     """
+    platform = get_os_platform()
     home = Path.home()
 
-    if sys.platform.startswith("win"):
+    if platform == "win":
         # Windows standard: %LOCALAPPDATA% (or fallback to ~/AppData/Local)
         base_dir = os.environ.get("LOCALAPPDATA")
         if base_dir:
@@ -17,7 +39,7 @@ def get_user_data_dir(app_name: str) -> Path:
         else:
             data_dir = home / "AppData" / "Local" / app_name
 
-    elif sys.platform == "darwin":
+    elif platform == "macosx":
         # macOS standard: ~/Library/Application Support
         data_dir = home / "Library" / "Application Support" / app_name
 
