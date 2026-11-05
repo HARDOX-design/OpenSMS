@@ -4,11 +4,11 @@ name: 'Windows Executables'
 
 on:
 
-  push:
-    branches:
-      - main
-    paths:
-      - 'app/**'
+  #push:
+  #  branches:
+  #    - main
+  #  paths:
+  #    - 'app/**'
   workflow_dispatch:
 
 # Top-level permissions
@@ -65,12 +65,21 @@ jobs:
           pip install -r req_desktop.txt
           python -c "import sys; print(sys.executable)"
 
+      - name: Configure Windows graphics backend
+        shell: pwsh
+        run: |
+          (Get-Content main.py -Raw).Replace(
+            "os.environ['KIVY_GL_BACKEND'] = 'sdl2'",
+            "os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'"
+          ) | Set-Content main.py -NoNewline
+          Get-Content main.py | Select-Object -First 5
+
       - name: Check Windows graphics environment
         shell: pwsh
         run: |
           Get-CimInstance Win32_VideoController |
             Format-Table Name, DriverVersion, Status
-          python -c "import os; os.environ['KIVY_GL_BACKEND']='sdl2'; from kivy.core.window import Window; print(Window)"
+          python -c "import os; os.environ['KIVY_GL_BACKEND']='angle_sdl2'; from kivy.core.window import Window; print(Window)"
 
       - name: PyInstaller CLI
         id: 'py_cli'
