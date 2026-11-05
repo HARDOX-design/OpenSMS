@@ -62,26 +62,32 @@ jobs:
         run: |
           cd app
           python --version
-          pip install -r req_desktop.txt
+          pip install -r req_cli.txt
           python -c "import sys; print(sys.executable)"
 
-      - name: Configure Windows graphics backend
-        shell: pwsh
-        run: |
-          cd app
-          (Get-Content main.py -Raw).Replace(
-            "os.environ['KIVY_GL_BACKEND'] = 'sdl2'",
-            "os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'"
-          ) | Set-Content main.py -NoNewline
-          Get-Content main.py | Select-Object -First 5
+      #- name: Configure Windows graphics backend
+      #  shell: pwsh
+      #  run: |
+      #    cd app
+      #    (Get-Content main.py -Raw).Replace(
+      #      "os.environ['KIVY_GL_BACKEND'] = 'sdl2'",
+      #      "os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'"
+      #    ) | Set-Content main.py -NoNewline
+      #    Get-Content main.py | Select-Object -First 5
 
-      - name: Check Windows graphics environment
+      #- name: Check Windows graphics environment
+      #  shell: pwsh
+      #  run: |
+      #    cd app
+      #    Get-CimInstance Win32_VideoController |
+      #      Format-Table Name, DriverVersion, Status
+      #    python -c "import os; os.environ['KIVY_GL_BACKEND']='angle_sdl2'; from kivy.core.window import Window; print(Window)"
+
+      - name: Test CLI imports
         shell: pwsh
         run: |
           cd app
-          Get-CimInstance Win32_VideoController |
-            Format-Table Name, DriverVersion, Status
-          python -c "import os; os.environ['KIVY_GL_BACKEND']='angle_sdl2'; from kivy.core.window import Window; print(Window)"
+          python openSmsCli.py --help
 
       - name: PyInstaller CLI
         id: 'py_cli'
@@ -89,13 +95,13 @@ jobs:
           cd app
           pyinstaller --clean --noconfirm desktopCli.spec
 
-      - name: PyInstaller GUI
-        id: 'py_gui'
-        shell: pwsh
-        run: |
-          cd app
-          $env:KIVY_GL_BACKEND = "sdl2"
-          pyinstaller --clean --noconfirm desktopGui.spec
+      #- name: PyInstaller GUI
+      #  id: 'py_gui'
+      #  shell: pwsh
+      #  run: |
+      #    cd app
+      #    $env:KIVY_GL_BACKEND = "sdl2"
+      #    pyinstaller --clean --noconfirm desktopGui.spec
 
       #- name: Upload artifact
       #  uses: actions/upload-pages-artifact@v3
@@ -112,4 +118,4 @@ jobs:
           generate_release_notes: true
           files: |
             app/dist/openSmsCli.exe
-            app/dist/OpenSmsApp.exe
+          #app/dist/OpenSmsApp.exe
