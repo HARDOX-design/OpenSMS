@@ -57,13 +57,6 @@ jobs:
           python-version: '3.13'
           cache: 'pip'
 
-      - name: Check Windows graphics environment
-        shell: pwsh
-        run: |
-          Get-CimInstance Win32_VideoController |
-            Format-Table Name, DriverVersion, Status
-          python -c "import os; os.environ['KIVY_GL_BACKEND']='sdl2'; from kivy.core.window import Window; print(Window)"
-
       - name: Pip Install n Checks
         id: 'pip_install'
         run: |
@@ -71,6 +64,13 @@ jobs:
           python --version
           pip install -r req_desktop.txt
           python -c "import sys; print(sys.executable)"
+
+      - name: Check Windows graphics environment
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_VideoController |
+            Format-Table Name, DriverVersion, Status
+          python -c "import os; os.environ['KIVY_GL_BACKEND']='sdl2'; from kivy.core.window import Window; print(Window)"
 
       - name: PyInstaller CLI
         id: 'py_cli'
