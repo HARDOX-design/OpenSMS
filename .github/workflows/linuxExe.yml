@@ -30,7 +30,9 @@ jobs:
         id: 'install_prereq'
         run: |
           #sudo apt update
-          sudo apt install -y libcairo2-dev pkg-config libjpeg-dev zlib1g-dev
+          sudo apt install -y libcairo2-dev pkg-config libjpeg-dev zlib1g-dev \
+            libgl1-mesa-dev libgles2-mesa-dev freeglut3-dev libsdl2-dev \
+            libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev
 
       - name: Set version
         id: 'set_version'
