@@ -30,6 +30,8 @@ jobs:
         id: 'set_version'
         shell: python
         working-directory: ./app
+        env:
+          PYTHONPATH: .
         run: |
           import os
           from services.config import __version__ as app_version
