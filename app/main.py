@@ -43,7 +43,7 @@ from services.postApi import get_api_keys, generate_new_api_key
 from services.netSvc import get_network_ips
 from services.config import __version__, app_name
 
-# IMPORTANT: Set this property for keyboard behavior
+# IMPORTANT: Set this property for keyboard behaviour
 Window.softinput_mode = "below_target"
 
 # import platform specific modules

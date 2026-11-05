@@ -31,7 +31,7 @@ jobs:
         shell: python
         run: |
           import os
-          from app.services.config import __version__ as as app_version
+          from app.services.config import __version__ as app_version
           # Write to GITHUB_OUTPUT
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
             f.write(f"app_version={app_version}\n")
