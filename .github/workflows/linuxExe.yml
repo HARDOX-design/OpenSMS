@@ -6,7 +6,7 @@ on:
 
   push:
     branches:
-      - 'develop' # will change to main
+      - main
     paths:
       - 'app/**'
 
@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 jobs:
-  linux_cli:
+  linux_job:
     name: 'Build and Release'
     runs-on: 'ubuntu-24.04'
     permissions:
