@@ -2,6 +2,8 @@ from kivymd.uix.boxlayout import MDBoxLayout
 from kivymd.uix.button import MDButton, MDButtonIcon, MDButtonText
 from kivymd.uix.card import MDCard
 from kivymd.uix.list import MDListItem
+from kivymd.uix.dropdownitem import MDDropDownItem, MDDropDownItemText
+from kivymd.uix.textfield import MDTextField, MDTextFieldTrailingIcon
 
 from kivy.lang import Builder
 from kivy.uix.widget import Widget
@@ -49,6 +51,19 @@ Builder.load_string('''
         theme_text_color: "Custom"
         text_color: "black"
 
+<SerialBtn>
+    pos_hint: {"center_x": .5}
+    theme_bg_color: "Custom"
+    md_bg_color: self.btn_colour
+    MDButtonIcon:
+        icon: root.btn_icon
+        theme_text_color: "Custom"
+        text_color: "white"
+    MDButtonText:
+        text: root.btn_txt
+        theme_text_color: "Custom"
+        text_color: "white"
+
 <AppHomeBox>:
     orientation: 'vertical'
     #md_bg_color: '#7643a8'
@@ -66,8 +81,7 @@ Builder.load_string('''
 
             MDCard:
                 orientation: "vertical"
-                size_hint_y: None
-                height: dp(192)
+                adaptive_height: True
                 padding: dp(16)
                 spacing: dp(8)
                 radius: [24, 24, 24, 24]
@@ -132,6 +146,68 @@ Builder.load_string('''
                     adaptive_height: True
                     spacing: dp(16)
 
+            MDCard:
+                id: serial_card
+                orientation: "vertical"
+                adaptive_height: True
+                padding: dp(16)
+                spacing: dp(8)
+                radius: [24, 24, 24, 24]
+                theme_bg_color: "Custom"
+                md_bg_color: "#17595c"
+                disabled: True
+
+                MDLabel:
+                    text: "Set Serial (COM) Port"
+                    font_style: "Headline"
+                    role: "small"
+                    theme_text_color: "Custom"
+                    text_color: "#ffffff"
+                    adaptive_height: True
+
+                MDLabel:
+                    id: serial_stat_lbl
+                    text: "Modem connection is not started yet"
+                    font_style: "Body"
+                    role: "medium"
+                    theme_text_color: "Custom"
+                    text_color: "#e4ecf7"
+                    adaptive_height: True
+
+                MDListItem:
+                    padding: dp(16)
+                    on_release: app.open_serial_menu()
+                    MDListItemLeadingIcon:
+                        icon: "serial-port"
+                    MDListItemHeadlineText:
+                        text: "Serial Port"
+                    MDListItemSupportingText:
+                        text: "For AT commands"
+                    MDDropDownItem:
+                        id: serial_dropdwn
+                        pos_hint: {"center_y": .5}
+                        on_release: app.open_serial_menu()
+                        MDDropDownItemText:
+                            id: port_dropdown
+                            text: "Choose"
+
+                MDListItem:
+                    MDListItemLeadingIcon:
+                        icon: "speedometer"
+                    MDListItemHeadlineText:
+                        text: "Baud Rate"
+                    MDListItemSupportingText:
+                        text: "Default: 115200"
+                    MDTextField:
+                        id: baud_rate
+                        text: "115200"
+                        mode: "outlined"
+                        input_filter: 'int'
+
+                SerialBtn:
+                    id: serial_btn
+                    on_release: app.start_serial_connection()
+
 
 ''')
 
@@ -142,6 +218,11 @@ class ButtonControl(MDButton):
     btn_icon = StringProperty("play")
     btn_txt = StringProperty("Start Server")
     btn_colour = "green"
+
+class SerialBtn(MDButton):
+    btn_icon = StringProperty("serial-port")
+    btn_txt = StringProperty("Start Serial")
+    btn_colour = "black"
 
 class DocButton(MDButton):
     btn_icon = StringProperty("file-document-check")
@@ -157,3 +238,6 @@ class EndPointUrl(MDListItem):
 
     def copy_url(self, instance=None):
         Clipboard.copy(self.url)
+
+class SerialCard(MDListItem):
+    pass

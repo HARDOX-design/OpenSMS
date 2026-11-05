@@ -1,0 +1,92 @@
+# Generates OpenSms executables for Linux
+
+name: 'Windows Executables'
+
+on:
+
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/**'
+
+# Top-level permissions
+permissions:
+  contents: read
+
+jobs:
+  win_build:
+    name: 'Build and Release'
+    runs-on: windows-2022
+    permissions:
+      contents: write       # Needed to create/update the release and tags
+      pull-requests: read
+
+    steps:
+
+      - name: GIT Checkout
+        id: 'git-checkout'
+        uses: "actions/checkout@v4"
+
+      - name: Install Dependencies
+        id: 'install_prereq'
+        run: |
+          #sudo apt update
+          sudo apt install -y libcairo2-dev pkg-config libjpeg-dev zlib1g-dev \
+            libgl1-mesa-dev libgles2-mesa-dev freeglut3-dev libsdl2-dev \
+            libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev
+
+      - name: Set version
+        id: 'set_version'
+        shell: python
+        working-directory: ./app
+        env:
+          PYTHONPATH: .
+        run: |
+          import os
+          from services.config import __version__ as app_version
+          # Write to GITHUB_OUTPUT
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"app_version=v{app_version}\n")
+
+      - name: Check app version
+        run: |
+          echo "App version is: ${{ steps.set_version.outputs.app_version }}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Pip Install n Checks
+        id: 'pip_install'
+        run: |
+          cd app
+          python --version
+          pip install -r req_desktop.txt
+          python -c "import sys; print(sys.executable)"
+
+      - name: PyInstaller CLI
+        id: 'py_cli'
+        run: |
+          cd app
+          pyinstaller desktopCli.spec
+          pyinstaller desktopGui.spec
+
+      #- name: Upload artifact
+      #  uses: actions/upload-pages-artifact@v3
+      #  with:
+      #    path: './flasher'
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.set_version.outputs.app_version }}
+          name: ${{ steps.set_version.outputs.app_version }}
+          draft: false
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            app/dist/openSmsCli.exe
+            app/dist/OpenSmsApp.exe

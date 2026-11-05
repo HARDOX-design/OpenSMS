@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+https://github.com/kivymd/KivyMD/archive/master.zip # 2.0.1.dev0
+Cython==0.29.36
+kivy[base]==2.3.1
+psutil
+pyserial
+pyinstaller
+

@@ -30,11 +30,12 @@ from kivymd.uix.navigationbar import MDNavigationBar, MDNavigationItem
 from kivymd.uix.screen import MDScreen
 from kivymd.uix.boxlayout import MDBoxLayout
 from kivymd.uix.button import MDButton, MDButtonIcon, MDButtonText
-#from kivymd.uix.label import MDLabel
+from kivymd.uix.menu import MDDropdownMenu
+from kivymd.uix.label import MDLabel
 from kivymd.uix.dialog import MDDialog, MDDialogHeadlineText, MDDialogSupportingText, MDDialogButtonContainer, MDDialogContentContainer
 
 # import screens (else pyinstaller may ignore it)
-from screens.mainScr import ButtonControl, EndPointUrl, DocButton
+from screens.mainScr import ButtonControl, EndPointUrl, DocButton, SerialCard
 from screens.settings import SettingsBox, ApiKeyTxtbox
 
 # import services
@@ -42,7 +43,7 @@ from services.postApi import get_api_keys, generate_new_api_key
 from services.netSvc import get_network_ips
 from services.config import __version__, app_name
 
-# IMPORTANT: Set this property for keyboard behavior
+# IMPORTANT: Set this property for keyboard behaviour
 Window.softinput_mode = "below_target"
 
 # import platform specific modules
@@ -57,6 +58,7 @@ if platform == "android":
 else:
     from services.appSvc import app_service_thread
     from services.pathMgr import get_user_data_dir
+    from services.serialMgr import get_com_ports
 
 # Local classes
 class BaseMDNavigationItem(MDNavigationItem):
@@ -102,6 +104,8 @@ class OpenSmsApp(MDApp):
         self.api_started = False
         self.key_exists = False
         self.api_key = None
+        self.serial_started = False
+        self.serial_dropdown_menu = None
         self.config_template = {
             "app": app_name,
             "port": 9292,
@@ -111,6 +115,8 @@ class OpenSmsApp(MDApp):
         self.req_template = {
             "port": 9292,
             "server": "stop",
+            "serial_port": "none",
+            "baudrate": 115200,
         }
 
     def build(self):
@@ -126,6 +132,7 @@ class OpenSmsApp(MDApp):
         # for android
         if platform == "android":
             file_m_height = 0.9
+            self.root.ids.home_scr.ids.serial_card.opacity = 0
             from android.storage import app_storage_path
             sdk_version = 33
             try:
@@ -158,12 +165,29 @@ class OpenSmsApp(MDApp):
                 print(f"Error while starting android service: {e}")
         # non android platforms
         else:
+            self.service_stat = True
+            # Path related set up
             self.internal_storage = get_user_data_dir(self.config_template["app"])
             self.config_dir = os.path.join(self.internal_storage, 'config')
             os.makedirs(self.config_dir, exist_ok=True)
             self.request_path = os.path.join(self.config_dir, "request.json")
             self.resp_path = os.path.join(self.config_dir, "resp.json")
             self.write_request()
+            # Serial setup
+            ports = get_com_ports()
+            if len(ports) >= 1:
+                serial_card = self.root.ids.home_scr.ids.serial_card
+                serial_card.disabled = False
+                menu_items = [
+                    {
+                        "text": f"{port}",
+                        "on_release": lambda x=f"{port}": self.serial_port_select(x),
+                    } for port in ports
+                ]
+                self.serial_dropdown_menu = MDDropdownMenu(
+                    caller=serial_card, items=menu_items, position="center"
+                )
+            # Start the app service
             Thread(target=app_service_thread, daemon=True).start()
         # All generic things
         self.app_config = os.path.join(self.config_dir, "config.json")
@@ -215,28 +239,33 @@ class OpenSmsApp(MDApp):
             return False
 
     def start_service(self):
-        PythonActivity = autoclass('org.kivy.android.PythonActivity')
-        mActivity = PythonActivity.mActivity
-        service = autoclass('in.daslearning.opensms.ServiceOpensmssvc')
-        #argument = ''
-        argument = os.environ.get('PYTHON_SERVICE_ARGUMENT', '')
-        print(f"PYTHON_SERVICE_ARGUMENT: {argument}")
-        #service.start(mActivity, argument)
-        service.start(mActivity, 'icon', 'OpenSMS API', 'Service Running' , argument)
+        if platform == "android":
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            mActivity = PythonActivity.mActivity
+            service = autoclass('in.daslearning.opensms.ServiceOpensmssvc')
+            #argument = ''
+            argument = os.environ.get('PYTHON_SERVICE_ARGUMENT', '')
+            print(f"PYTHON_SERVICE_ARGUMENT: {argument}")
+            #service.start(mActivity, argument)
+            service.start(mActivity, 'icon', 'OpenSMS API', 'Service Running' , argument)
         self.service_stat = True
 
     def stop_service(self):
-        service = autoclass('in.daslearning.opensms.ServiceOpensmssvc')
-        PythonActivity = autoclass('org.kivy.android.PythonActivity')
-        mActivity = PythonActivity.mActivity
-        service.stop(mActivity)
-        self.service_stat = False
+        if platform == "android":
+            service = autoclass('in.daslearning.opensms.ServiceOpensmssvc')
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            mActivity = PythonActivity.mActivity
+            service.stop(mActivity)
+            self.service_stat = False
 
     def resp_check_loop(self):
         self.api_started = False
+        self.serial_started = False
         import time
         api_srv_btn = self.root.ids.home_scr.ids.api_srv_btn
         api_srv_lbl = self.root.ids.home_scr.ids.api_srv_lbl
+        serial_btn = self.root.ids.home_scr.ids.serial_btn
+        serial_stat_lbl = self.root.ids.home_scr.ids.serial_stat_lbl
         time.sleep(0.5) # A delay for the android service to kick in
         # debug
         print_path = os.path.abspath(self.resp_path)
@@ -248,6 +277,7 @@ class OpenSmsApp(MDApp):
                     with open(self.resp_path, "r", encoding="utf-8") as rf:
                         resp = json.load(rf)
                     if resp:
+                        # server status
                         server_stat = resp.get("server", "unknown")
                         if server_stat == "started":
                             if not self.api_started:
@@ -267,6 +297,17 @@ class OpenSmsApp(MDApp):
                                 api_srv_btn.md_bg_color = "green"
                                 Clock.schedule_once(lambda dt: self.clear_api_details())
                                 #Clock.schedule_once(lambda dt: self.show_toast_msg("API Server Stopped"))
+
+                        # serial status
+                        if platform != "android":
+                            ser_stat = resp.get("serial", "none")
+                            provider = resp.get("provider", "unknown")
+                            if not self.serial_started:
+                                if ser_stat == "ok":
+                                    stat_text = f"Modem connected to: {provider}"
+                                    serial_stat_lbl.text = stat_text
+                                    serial_btn.btn_txt = "All Done"
+                                    serial_btn.md_bg_color = "orange"
                     else:
                         api_srv_lbl.text = "Unable to get response from service"
                 except Exception as e:
@@ -511,6 +552,36 @@ class OpenSmsApp(MDApp):
         if url:
             import webbrowser
             webbrowser.open(url)
+
+    ## Desktop specific setups
+
+    def open_serial_menu(self, instance=None):
+        if self.serial_dropdown_menu:
+            self.serial_dropdown_menu.open()
+
+    def serial_port_select(self, port:str):
+        self.req_template["serial_port"] = port
+        self.serial_dropdown_menu.dismiss()
+        port_dropdown = self.root.ids.home_scr.ids.port_dropdown
+        port_dropdown.text = port
+
+    def start_serial_connection(self, instance=None):
+        if self.serial_started:
+            self.show_toast_msg("Modem is already connected")
+            return
+        port = self.req_template["serial_port"]
+        if port == "none":
+            self.show_toast_msg("Please select the Serial Port first!", is_error=True)
+            return
+        baud_rate = self.root.ids.home_scr.ids.baud_rate.text
+        baud_int = self.req_template["baudrate"]
+        if len(baud_rate) >= 4:
+            try:
+                baud_int = int(baud_rate)
+                self.req_template["baudrate"] = baud_int
+            finally:
+                print(f"Using baud rate: {baud_int}")
+        Thread(target=self.write_request, daemon=True).start()
 
     ## Settings sections
     def save_settings(self, instance=None, control_txt="none"):

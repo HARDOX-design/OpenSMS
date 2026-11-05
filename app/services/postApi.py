@@ -13,26 +13,28 @@ from pydantic import BaseModel
 import uvicorn
 
 # local imports
-from services.smsApi import send_sms, clean_and_validate_phone
+from services.pathMgr import get_os_platform
+from services.smsApi import SmsCrossPlatform, clean_and_validate_phone
 from services.logSvc import LogService
 from services.config import app_name
 
 # OS specific
-try:
-    from kivy.utils import platform
-except ImportError:
-    if sys.platform.startswith("win"):
-        platform = "win"
-    elif sys.platform.startswith("linux"):
-        platform = "linux"
-    else:
-        platform = "unknown"
+#try:
+#    from kivy.utils import platform
+#except ImportError:
+#    if sys.platform.startswith("win"):
+#        platform = "win"
+#    elif sys.platform.startswith("linux"):
+#        platform = "linux"
+#    else:
+#        platform = "unknown"
 
 ## global vars / obj
+platform = get_os_platform()
 logger = None
+sms_api = SmsCrossPlatform()
 
 ## OS specific setups
-
 # for android
 if platform == "android":
     from android.storage import app_storage_path
@@ -40,12 +42,34 @@ if platform == "android":
     base_path = app_storage_path()
 #for other platforms like windows or linux
 else:
+    from services.serialMgr import SerialConDesktop
     from services.pathMgr import get_user_data_dir
     base_path = get_user_data_dir(app_name)
+    serial_mgr = SerialConDesktop()
 
 config_dir = join(base_path, 'config')
 
 ## Functions
+
+def set_serial_port(
+    port:str, 
+    baud_rate: int | None = 115200,
+    timeout: int = 3,
+    write_timeout: int = 5
+):
+    set_ok = False
+    network_provider = "none"
+    if platform != "android":
+        set_ok = serial_mgr.initialize_gsm_module(
+            port,
+            baud_rate,
+            timeout,
+            write_timeout
+        )
+        network_provider = serial_mgr.get_net_operator()
+        if set_ok:
+            sms_api.set_serial_connection(serial_mgr)
+    return set_ok, network_provider
 
 def set_api_logger(log_obj:LogService):
     global logger
@@ -237,7 +261,7 @@ async def process_sms_req(
             detail="Invalid phone number",
         )
 
-    stat = send_sms(valid_phone, item.text)
+    stat = sms_api.send_sms(valid_phone, item.text)
     if stat:
         print(f"SMS dispatched to: {valid_phone}")
         log_activities(f"SMS dispatched to: {valid_phone}")
