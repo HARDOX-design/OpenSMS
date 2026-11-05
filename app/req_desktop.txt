@@ -6,3 +6,4 @@ kivy[base]==2.3.1
 psutil
 pyserial
 pyinstaller
+

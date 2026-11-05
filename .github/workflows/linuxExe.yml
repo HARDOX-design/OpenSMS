@@ -13,14 +13,13 @@ on:
 # Top-level permissions
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   linux_cli:
-    name: 'Main Job'
-    runs-on: 'ubuntu-latest'
+    name: 'Build and Release'
+    runs-on: 'ubuntu-24.04'
     permissions:
-      contents: write       # 👈 Needed to create/update the release and tags
+      contents: write       # Needed to create/update the release and tags
       pull-requests: read
 
     steps:
@@ -32,12 +31,10 @@ jobs:
       - name: Install Dependencies
         id: 'install_prereq'
         run: |
-          sudo add-apt-repository ppa:deadsnakes/ppa
-          sudo apt update
+          #sudo apt update
           sudo apt install -y libcairo2-dev pkg-config libjpeg-dev zlib1g-dev \
             libgl1-mesa-dev libgles2-mesa-dev freeglut3-dev libsdl2-dev \
-            libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev \
-            python3.13 python3.13-dev python3.13-venv
+            libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev
 
       - name: Set version
         id: 'set_version'
@@ -56,13 +53,29 @@ jobs:
         run: |
           echo "App version is: ${{ steps.set_version.outputs.app_version }}"
 
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Pip Install n Checks
+        id: 'pip_install'
+        run: |
+          cd app/
+          python --version
+          ldd --version | head -1
+          pip install -r req_desktop.txt
+          python -c "
+          import kivy
+          print('Kivy:', kivy.__version__)
+          "
+          python -m pip freeze | sort
+
       - name: PyInstaller CLI
         id: 'py_cli'
         run: |
           cd app/
-          python3.13 -m venv .env
-          source .env/bin/activate
-          pip install -r req_desktop.txt
           pyinstaller desktopCli.spec
           pyinstaller desktopGui.spec
 
