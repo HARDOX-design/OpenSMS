@@ -4,6 +4,7 @@
 
 ### 1.0.0
 - Adding Desktop support via [EC200U Module](https://www.quectel.com/product/lte-ec200u-series/) and technically should work with other such modules via the `AT` commands.
+- Both CLI & GUI can be used from Desktop platform. See the [README](./README.md) for more details.
 
 ### 0.3.0
 - Service type is sticky now, should restart automatically unless stopped. [android]

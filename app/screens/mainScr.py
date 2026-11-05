@@ -2,6 +2,8 @@ from kivymd.uix.boxlayout import MDBoxLayout
 from kivymd.uix.button import MDButton, MDButtonIcon, MDButtonText
 from kivymd.uix.card import MDCard
 from kivymd.uix.list import MDListItem
+from kivymd.uix.dropdownitem import MDDropDownItem, MDDropDownItemText
+from kivymd.uix.textfield import MDTextField, MDTextFieldTrailingIcon
 
 from kivy.lang import Builder
 from kivy.uix.widget import Widget
