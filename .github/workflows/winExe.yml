@@ -68,6 +68,7 @@ jobs:
       - name: Configure Windows graphics backend
         shell: pwsh
         run: |
+          cd app
           (Get-Content main.py -Raw).Replace(
             "os.environ['KIVY_GL_BACKEND'] = 'sdl2'",
             "os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'"
