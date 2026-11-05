@@ -32,10 +32,12 @@ jobs:
       - name: Install Dependencies
         id: 'install_prereq'
         run: |
-          #sudo apt update
+          sudo add-apt-repository ppa:deadsnakes/ppa
+          sudo apt update
           sudo apt install -y libcairo2-dev pkg-config libjpeg-dev zlib1g-dev \
             libgl1-mesa-dev libgles2-mesa-dev freeglut3-dev libsdl2-dev \
-            libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev
+            libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev \
+            python3.13 python3.13-dev python3.13-venv
 
       - name: Set version
         id: 'set_version'
@@ -58,7 +60,7 @@ jobs:
         id: 'py_cli'
         run: |
           cd app/
-          python -m venv .env
+          python3.13 -m venv .env
           source .env/bin/activate
           pip install -r req_desktop.txt
           pyinstaller desktopCli.spec
