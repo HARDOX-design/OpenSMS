@@ -3,6 +3,8 @@
 # 📨 OpenSMS
 An open-source cross-platform solution to host a `SMS` API server locally.
 
+<a href="https://github.com/daslearning-org/OpenSMS/releases" target="_blank" rel="noopener noreferrer"><img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/daslearning-org/OpenSMS/total"></a>
+
 <details>
   <summary>Keeping things simple</summary>
 
@@ -73,7 +75,7 @@ chmod +x openSmsCli
 ```bash
 git clone https://github.com/daslearning-org/OpenSMS.git
 cd OpenSMS/app
-pip install -r requirements.txt # virtual env is recommended
+pip install -r req_cli.txt # virtual env is recommended
 python openSmsCli.py --help # to know the arguments
 ```
 
