@@ -2,6 +2,10 @@
 
 ## Changes
 
+### 1.0.1
+- Adding athentication on `/control` path (not in use as of now).
+- Some cleanups.
+
 ### 1.0.0
 - Adding Desktop support via [EC200U Module](https://www.quectel.com/product/lte-ec200u-series/) and technically should work with other such modules via the `AT` commands.
 - Both CLI & GUI can be used from Desktop platform. See the [README](./README.md) for more details.

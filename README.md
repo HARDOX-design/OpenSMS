@@ -31,6 +31,8 @@ You can click on the below Image or this [Youtube Link](https://www.youtube.com/
 ## 🧑‍💻 Quickstart Guide
 
 ### 📱 Android Platform
+Minimum `Android 9` is required and our published app only support `64 bit`. (You may build for other architecture with `buildozer`)
+
 1. You can check the [Releases](https://github.com/daslearning-org/OpenSMS/releases) and downlaod the latest version of the android app on your phone.
 2. You may need to disable (temporarily) `Play Protect` from your `Play Store` settings.
 3. Install the App & launch.
