@@ -95,6 +95,68 @@ Builder.load_string('''
 
             MDListItem:
                 MDListItemLeadingIcon:
+                    icon: "webhook"
+                MDListItemHeadlineText:
+                    text: "Webhook (Inbound SMS)"
+                MDListItemSupportingText:
+                    text: "POST received SMS to a URL"
+                MDSwitch:
+                    id: webhook_sw
+                    pos_hint: {"center_y": 0.5}
+                    icon_active: "check"
+                    icon_inactive: "close"
+                    icon_active_color: "green"
+                    track_color_active: "green"
+
+            MDListItem:
+                MDListItemLeadingIcon:
+                    icon: "link"
+                MDListItemHeadlineText:
+                    text: "Webhook URL"
+                MDListItemSupportingText:
+                    text: "http:// or https://"
+                MDTextField:
+                    id: webhook_url_inp
+                    mode: "outlined"
+
+            MDListItem:
+                MDListItemLeadingIcon:
+                    icon: "lock"
+                MDListItemHeadlineText:
+                    text: "Signing Secret"
+                MDListItemSupportingText:
+                    text: "Optional HMAC-SHA256"
+                MDTextField:
+                    id: webhook_secret_inp
+                    mode: "outlined"
+                    password: True
+
+            MDListItem:
+                MDListItemLeadingIcon:
+                    icon: "information"
+                MDListItemHeadlineText:
+                    text: "Last Webhook Delivery"
+                MDListItemSupportingText:
+                    id: webhook_status_lbl
+                    text: "No deliveries yet"
+
+            MDBoxLayout:
+                orientation: "vertical"
+                adaptive_height: True
+                padding: dp(8)
+                spacing: dp(8)
+
+                MDButton:
+                    style: "filled"
+                    pos_hint: {"center_x": .5}
+                    on_release: app.send_webhook_test()
+                    MDButtonIcon:
+                        icon: "send"
+                    MDButtonText:
+                        text: "Send Test Webhook"
+
+            MDListItem:
+                MDListItemLeadingIcon:
                     icon: "key"
                 MDListItemHeadlineText:
                     text: "API Key"
