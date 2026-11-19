@@ -199,6 +199,10 @@ assert hmac.compare_digest(expected, request.headers["X-OpenSMS-Signature"])
 - Only SMS is forwarded, not MMS.
 - GCM/Play policy does not apply here; the app is distributed as an APK, but `RECEIVE_SMS` is a sensitive permission, so the "restricted settings" step from the Android install guide is required on newer versions.
 
+### 📬 Companion inbox
+
+If you do not want to build your own receiver, [OpenSMS Inbox](https://github.com/japperJ/opensms-inbox) is a small self-hosted FastAPI + SQLite web inbox. It verifies the signature, stores messages, and provides search, detail and delete. Point the Webhook URL at `http://<your-host>:8099/hook`.
+
 
 ## 📚 Tech Stack Used
 
