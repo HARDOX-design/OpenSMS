@@ -107,6 +107,7 @@ Builder.load_string('''
                     icon_inactive: "close"
                     icon_active_color: "green"
                     track_color_active: "green"
+                    on_active: app.webhook_switch_active(self, self.active)
 
             MDListItem:
                 MDListItemLeadingIcon:

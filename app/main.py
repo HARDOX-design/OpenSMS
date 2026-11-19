@@ -46,6 +46,7 @@ from services.config import __version__, app_name
 from services.webhookSvc import (
     default_webhook_config,
     format_webhook_status,
+    get_webhook_config,
     is_valid_target,
     normalize_webhook_config,
     read_webhook_status,
@@ -119,6 +120,7 @@ class OpenSmsApp(MDApp):
         self.serial_started = False
         self.serial_dropdown_menu = None
         self.webhook_status_path = None
+        self.webhook_switch_guard = False
         self.config_template = {
             "app": app_name,
             "port": 9292,
@@ -639,13 +641,10 @@ class OpenSmsApp(MDApp):
         webhook_enabled, webhook_url, webhook_secret = self.read_webhook_inputs()
         if not self.validate_webhook(webhook_enabled, webhook_url):
             return
-        self.config_template["webhook"] = {
-            "enabled": webhook_enabled,
-            "url": webhook_url,
-            "secret": webhook_secret,
-        }
+        self.save_webhook_config(
+            webhook_enabled, webhook_url, webhook_secret
+        )
         print(f"Service on start: {self.config_template["boot"]}, port: {self.config_template["port"]}")
-        Thread(target=self.write_app_conf, daemon=True).start()
         Clock.schedule_once(lambda dt: self.show_toast_msg("Settings has been saved."))
 
     def read_webhook_inputs(self):
@@ -656,16 +655,45 @@ class OpenSmsApp(MDApp):
             settings.webhook_secret_inp.text.strip(),
         )
 
-    def validate_webhook(self, enabled: bool, url: str) -> bool:
-        if url and not is_valid_target(url):
+    def save_webhook_config(self, enabled: bool, url: str, secret: str):
+        self.config_template["webhook"] = {
+            "enabled": enabled,
+            "url": url,
+            "secret": secret,
+        }
+        Thread(target=self.write_app_conf, daemon=True).start()
+
+    def webhook_switch_active(self, instance, value):
+        """Apply the toggle immediately, instead of waiting for Save.
+
+        on_active carries the new value; reading `active` from on_release is
+        one event too early and saved the previous state.
+        """
+        if self.webhook_switch_guard:
+            return
+        enabled = bool(value)
+        _, url, secret = self.read_webhook_inputs()
+        if enabled and not is_valid_target(url):
+            self.webhook_switch_guard = True
+            instance.active = False
+            self.webhook_switch_guard = False
             self.show_toast_msg(
-                "Webhook URL must start with http:// or https://",
+                "Add a valid http:// or https:// webhook URL first",
                 is_error=True,
             )
-            return False
-        if enabled and not url:
+            return
+        self.save_webhook_config(enabled, url, secret)
+        self.show_toast_msg(
+            "Webhook enabled" if enabled else "Webhook disabled"
+        )
+
+    def validate_webhook(self, enabled: bool, url: str) -> bool:
+        # Turning it off must always be possible, even with a stale URL.
+        if not enabled:
+            return True
+        if not is_valid_target(url):
             self.show_toast_msg(
-                "Add a webhook URL before enabling or testing",
+                "Add a valid http:// or https:// webhook URL first",
                 is_error=True,
             )
             return False
@@ -676,10 +704,21 @@ class OpenSmsApp(MDApp):
             self.config_template.get("webhook")
         )
         settings = self.root.ids.settings_scr.ids
-        settings.webhook_sw.active = webhook["enabled"]
+        self.webhook_switch_guard = True
+        try:
+            settings.webhook_sw.active = webhook["enabled"]
+        finally:
+            self.webhook_switch_guard = False
         settings.webhook_url_inp.text = webhook["url"]
         settings.webhook_secret_inp.text = webhook["secret"]
         self.refresh_webhook_status()
+
+    def reload_webhook_config(self):
+        """Pick up the persisted config (e.g. after an external change)."""
+        self.config_template["webhook"] = get_webhook_config(
+            self.app_config
+        )
+        self.refresh_webhook_view()
 
     def refresh_webhook_status(self):
         if not self.webhook_status_path:
@@ -817,7 +856,7 @@ class OpenSmsApp(MDApp):
     def on_settings_entry(self, instance=None):
         self.root.ids.top_back_btn.opacity = 1
         self.root.ids.top_back_btn.disabled = False
-        self.refresh_webhook_status()
+        self.reload_webhook_config()
 
     def back_button_action(self, instance=None):
         if self.root.ids.screen_manager.current in ["Settings", "Logs"]:
