@@ -59,7 +59,10 @@ def get_webhook_config(config_path: str) -> dict:
 def is_valid_target(url: str) -> bool:
     if not isinstance(url, str):
         return False
-    parsed = urlparse(url.strip())
+    try:
+        parsed = urlparse(url.strip())
+    except ValueError:
+        return False
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 ## Payload
@@ -74,16 +77,25 @@ def iso_from_millis(timestamp_ms) -> str | None:
         timestamp_ms / 1000, tz=timezone.utc
     ).isoformat(timespec="seconds")
 
+def iso_from_millis_local(timestamp_ms) -> str | None:
+    if not isinstance(timestamp_ms, (int, float)) or timestamp_ms <= 0:
+        return None
+    return datetime.fromtimestamp(
+        timestamp_ms / 1000
+    ).astimezone().isoformat(timespec="seconds")
+
 def build_inbound_payload(message: dict) -> dict:
     """Turn a stored inbound message into the public webhook payload.
 
-    `message` is what the Android receiver wrote to the inbox file. The sender
+    `message` is what the Android receiver wrote to the inbox spool. The sender
     is kept verbatim because it may be an alphanumeric sender ID.
     """
     payload = {
         "event": EVENT_INBOUND,
         "delivery_id": str(uuid.uuid4()),
-        "received_at": iso_now(),
+        "received_at": (
+            iso_from_millis_local(message.get("received_at_ms")) or iso_now()
+        ),
         "sent_at": iso_from_millis(message.get("sent_at_ms")),
         "from": message.get("from") or "unknown",
         "text": message.get("text") or "",
@@ -135,11 +147,23 @@ def build_headers(payload: dict, body: bytes, secret: str = "") -> dict:
         headers["X-OpenSMS-Signature"] = signature
     return headers
 
+class _NoRedirect(urlrequest.HTTPRedirectHandler):
+    """Treat 3xx as failures: a redirected POST must not count as delivered."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urlrequest.build_opener(_NoRedirect())
+
 def post_json(url: str, body: bytes, headers: dict, timeout: float) -> tuple:
     """POST once. Returns (ok, http_status, error_message)."""
-    req = urlrequest.Request(url, data=body, headers=headers, method="POST")
     try:
-        with urlrequest.urlopen(req, timeout=timeout) as resp:
+        req = urlrequest.Request(url, data=body, headers=headers, method="POST")
+    except Exception as exc:
+        return False, None, str(exc) or exc.__class__.__name__
+    try:
+        with _opener.open(req, timeout=timeout) as resp:
             resp.read()
             status = getattr(resp, "status", resp.getcode())
         return (200 <= int(status) < 300), int(status), None
@@ -183,38 +207,48 @@ def format_webhook_status(status: dict | None) -> str:
     attempts = status.get("attempts", 0)
     return f"Last delivery: failed after {attempts} attempt(s) at {when} ({error})"
 
-def drain_inbox_file(inbox_path: str) -> list:
-    """Atomically take every message the Android receiver stored.
-
-    The file is renamed before reading, so a message arriving during the drain
-    lands in a fresh inbox file instead of being lost.
-    """
-    if not os.path.exists(inbox_path):
-        return []
-    processing_path = f"{inbox_path}.processing"
+def _remove_quietly(path: str):
     try:
-        os.replace(inbox_path, processing_path)
+        os.remove(path)
     except OSError:
+        pass
+
+def claim_inbox_messages(inbox_dir: str) -> list:
+    """Claim spooled inbound messages so they can be forwarded durably.
+
+    The Android receiver writes one JSON file per SMS, then renames it into
+    place. Each returned item has a `path` (renamed to `.processing`) and the
+    parsed `message`. Acknowledge with `ack_inbox_message` only after the
+    message is durably in the Outbox, so a crash leaves it to be claimed again.
+    """
+    if not os.path.isdir(inbox_dir):
         return []
-    messages = []
-    try:
-        with open(processing_path, "r", encoding="utf-8") as inf:
-            for line in inf:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    message = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(message, dict):
-                    messages.append(message)
-    finally:
+    claimed = []
+    for name in sorted(os.listdir(inbox_dir)):
+        if not (name.endswith(".json") or name.endswith(".processing")):
+            continue
+        path = os.path.join(inbox_dir, name)
+        if name.endswith(".json"):
+            processing_path = f"{path}.processing"
+            try:
+                os.replace(path, processing_path)
+            except OSError:
+                continue
+            path = processing_path
         try:
-            os.remove(processing_path)
-        except OSError:
-            pass
-    return messages
+            with open(path, "r", encoding="utf-8") as message_file:
+                message = json.load(message_file)
+        except Exception:
+            _remove_quietly(path)
+            continue
+        if isinstance(message, dict):
+            claimed.append({"path": path, "message": message})
+        else:
+            _remove_quietly(path)
+    return claimed
+
+def ack_inbox_message(path: str):
+    _remove_quietly(path)
 
 ## Dispatcher
 
@@ -328,7 +362,11 @@ class WebhookDispatcher:
                 current = self._outbox.get(delivery_id)
             if not current:
                 continue
-            ok, status, error = self._deliver(current)
+            ok, status, error, interrupted = self._deliver(current)
+            if interrupted:
+                # Leave the record in the Outbox so it is delivered after the
+                # next service start instead of being reported as failed.
+                break
             with self._lock:
                 self._outbox.pop(delivery_id, None)
                 self._persist_outbox()
@@ -346,14 +384,18 @@ class WebhookDispatcher:
                 )
 
     def _deliver(self, record: dict) -> tuple:
+        """Attempt delivery. Returns (ok, status, error, interrupted)."""
         status = None
         error = None
-        for attempt in range(1, self.max_attempts + 1):
+        attempts_done = int(record.get("attempts") or 0)
+        if attempts_done >= self.max_attempts:
+            return False, None, "retry limit reached", False
+        for attempt in range(attempts_done + 1, self.max_attempts + 1):
             if self._stop.is_set():
-                return False, status, "dispatcher stopped"
+                return False, status, "dispatcher stopped", True
             config = get_webhook_config(self.config_path)
             if not config["enabled"]:
-                return False, status, "webhook disabled"
+                return False, status, "webhook disabled", False
             record["attempts"] = attempt
             with self._lock:
                 self._persist_outbox()
@@ -363,12 +405,14 @@ class WebhookDispatcher:
                 record["url"], body, headers, self.timeout
             )
             if ok:
-                return True, status, None
+                return True, status, None, False
+            if self._stop.is_set():
+                return False, status, "dispatcher stopped", True
             if attempt < self.max_attempts:
                 wait_for = self.backoff[min(attempt - 1, len(self.backoff) - 1)]
                 if self._stop.wait(wait_for):
-                    return False, status, "dispatcher stopped"
-        return False, status, error
+                    return False, status, "dispatcher stopped", True
+        return False, status, error, False
 
     def _write_status(self, record: dict, ok: bool, status, error):
         payload = {

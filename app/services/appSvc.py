@@ -29,8 +29,9 @@ from services.logSvc import LogService
 from services.config import app_name
 from services.webhookSvc import (
     WebhookDispatcher,
+    ack_inbox_message,
     build_inbound_payload,
-    drain_inbox_file,
+    claim_inbox_messages,
 )
 
 # global vars
@@ -79,7 +80,7 @@ if not exists(config_dir):
 set_api_logger(log_obj)
 req_file = join(config_dir, "request.json")
 resp_file = join(config_dir, "resp.json")
-inbox_file = join(config_dir, "inbox.jsonl")
+inbox_dir = join(config_dir, "inbox")
 outbox_file = join(config_dir, "outbox.json")
 webhook_status_file = join(config_dir, "webhook_status.json")
 app_config_file = join(config_dir, "config.json")
@@ -193,17 +194,25 @@ def serial_conn_control(cmd:str):
 
 
 def process_inbound_inbox():
-    """Forward every inbound SMS persisted by the Android receiver."""
-    for message in drain_inbox_file(inbox_file):
-        payload = build_inbound_payload(message)
+    """Forward every inbound SMS claimed from the receiver's spool directory."""
+    for item in claim_inbox_messages(inbox_dir):
+        payload = build_inbound_payload(item["message"])
         log_activities(f"Inbound SMS received from: {payload['from']}")
-        if webhook_dispatcher.enqueue(payload):
+        try:
+            queued = webhook_dispatcher.enqueue(payload)
+        except Exception as e:
+            # Keep the .processing file so the next tick retries it.
+            print(f"Could not enqueue inbound SMS from {payload['from']}: {e}")
+            continue
+        if queued:
             print(f"Inbound SMS queued for webhook from: {payload['from']}")
         else:
             print(
                 "Inbound SMS not forwarded (webhook disabled or target "
                 f"invalid) from: {payload['from']}"
             )
+        # Only acknowledge once the Outbox has persisted the delivery.
+        ack_inbox_message(item["path"])
 
 
 def app_service_thread():

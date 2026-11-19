@@ -12,6 +12,7 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 
 /**
  * Persists inbound SMS for the foreground service to deliver as a webhook.
@@ -22,7 +23,7 @@ import java.nio.charset.StandardCharsets;
 public class SmsReceiver extends BroadcastReceiver {
 
     private static final String TAG = "OpenSMS";
-    private static final String INBOX_FILE = "inbox.jsonl";
+    private static final String INBOX_DIR = "inbox";
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -31,6 +32,7 @@ public class SmsReceiver extends BroadcastReceiver {
             return;
         }
 
+        long receivedAt = System.currentTimeMillis();
         try {
             SmsMessage[] messages =
                 Telephony.Sms.Intents.getMessagesFromIntent(intent);
@@ -60,6 +62,7 @@ public class SmsReceiver extends BroadcastReceiver {
             JSONObject record = new JSONObject();
             record.put("from", sender == null ? "unknown" : sender);
             record.put("text", body.toString());
+            record.put("received_at_ms", receivedAt);
             record.put("sent_at_ms", sentAt);
             record.put("parts", messages.length);
 
@@ -72,17 +75,28 @@ public class SmsReceiver extends BroadcastReceiver {
                 record.put("slot", slot);
             }
 
-            File configDir = new File(context.getFilesDir(), "config");
-            if (!configDir.exists() && !configDir.mkdirs()) {
-                Log.e(TAG, "Could not create the config directory");
+            File inboxDir = new File(context.getFilesDir(), "config/" + INBOX_DIR);
+            if (!inboxDir.exists() && !inboxDir.mkdirs()) {
+                Log.e(TAG, "Could not create the inbox directory");
                 return;
             }
 
-            File inbox = new File(configDir, INBOX_FILE);
-            try (FileOutputStream out = new FileOutputStream(inbox, true)) {
+            // Write to a .part file, then rename: the service only claims
+            // finished .json files, so it never reads a partial record.
+            File tempFile = File.createTempFile("inbound-", ".part", inboxDir);
+            try (FileOutputStream out = new FileOutputStream(tempFile)) {
                 out.write((record.toString() + "\n")
                     .getBytes(StandardCharsets.UTF_8));
                 out.flush();
+            }
+
+            File finalFile = new File(
+                inboxDir,
+                "sms-" + receivedAt + "-" + UUID.randomUUID() + ".json"
+            );
+            if (!tempFile.renameTo(finalFile)) {
+                Log.e(TAG, "Could not move the inbound SMS into the inbox");
+                tempFile.delete();
             }
         } catch (Exception exc) {
             Log.e(TAG, "Could not persist the inbound SMS", exc);

@@ -4,7 +4,8 @@ os.environ['KIVY_GL_BACKEND'] = 'sdl2'
 #Config.set("graphics", "multisamples", "0")
 import sys
 import json
-from threading import Thread
+import tempfile
+from threading import Thread, Lock
 
 from kivy.uix.widget import Widget
 from kivy.core.clipboard import Clipboard
@@ -53,6 +54,9 @@ from services.webhookSvc import (
 
 # IMPORTANT: Set this property for keyboard behaviour
 Window.softinput_mode = "below_target"
+
+# Save, Reset and permission confirmation write config from separate threads.
+config_write_lock = Lock()
 
 # import platform specific modules
 if platform == "android":
@@ -219,7 +223,14 @@ class OpenSmsApp(MDApp):
             self.config_template["webhook"] = normalize_webhook_config(
                 saved_config.get("webhook")
             )
-            print(f"start config check: {self.config_template}")
+            webhook_cfg = self.config_template["webhook"]
+            print(
+                "start config check: "
+                f"port={self.config_template['port']}, "
+                f"boot={self.config_template['boot']}, "
+                f"webhook enabled={webhook_cfg['enabled']}, "
+                f"target={webhook_cfg['url']}"
+            )
             self.req_template["port"] = int(self.config_template["port"])
             start_on_launch = self.config_template["boot"]
             if start_on_launch:
@@ -338,10 +349,19 @@ class OpenSmsApp(MDApp):
             time.sleep(2)
 
     def write_app_conf(self):
-        tmp_path = f"{self.app_config}.tmp"
-        with open(tmp_path, "w") as cf:
-            json.dump(self.config_template, cf)
-        os.replace(tmp_path, self.app_config)
+        with config_write_lock:
+            file_descriptor, tmp_path = tempfile.mkstemp(
+                prefix="config.",
+                suffix=".tmp",
+                dir=self.config_dir,
+            )
+            try:
+                with os.fdopen(file_descriptor, "w") as cf:
+                    json.dump(self.config_template, cf)
+                os.replace(tmp_path, self.app_config)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
 
     def write_request(self):
         with open(self.request_path, "w") as rf:
@@ -645,7 +665,7 @@ class OpenSmsApp(MDApp):
             return False
         if enabled and not url:
             self.show_toast_msg(
-                "Add a webhook URL before enabling it",
+                "Add a webhook URL before enabling or testing",
                 is_error=True,
             )
             return False
@@ -671,7 +691,8 @@ class OpenSmsApp(MDApp):
 
     def send_webhook_test(self, instance=None):
         webhook_enabled, webhook_url, webhook_secret = self.read_webhook_inputs()
-        if not self.validate_webhook(webhook_enabled, webhook_url):
+        # A test always needs a URL, even while the toggle is off.
+        if not self.validate_webhook(True, webhook_url):
             return
         self.root.ids.settings_scr.ids.webhook_status_lbl.text = (
             "Sending test webhook..."

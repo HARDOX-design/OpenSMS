@@ -177,7 +177,7 @@ X-OpenSMS-Signature: sha256=...
 - A multipart SMS is delivered as **one** webhook with the parts joined in `text` and counted in `parts`.
 - `sim` is included only when the subscription can be determined.
 
-A `2xx` response means delivered. Anything else (or a timeout after 10 seconds) is retried twice (after 5s and 30s); after three failed attempts the delivery is logged as failed. Pending webhooks are kept on disk and survive restarts. At most 100 are queued; when full, the oldest is dropped.
+A `2xx` response means delivered. Anything else (or a timeout after 10 seconds) is retried twice (after 5s and 30s); after three failed attempts the delivery is logged as failed. Redirects are not followed and count as failures. Pending webhooks are kept on disk and survive restarts. At most 100 are queued; when full, the oldest is dropped. Delivery is at-least-once: a crash immediately after persisting a delivery can produce a duplicate, but never a silent loss.
 
 ### Verify the signature
 
