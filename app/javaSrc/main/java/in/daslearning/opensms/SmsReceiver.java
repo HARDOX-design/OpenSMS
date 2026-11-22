@@ -17,8 +17,10 @@ import java.util.UUID;
 /**
  * Persists inbound SMS for the foreground service to deliver as a webhook.
  *
- * The receiver never performs network I/O: it only appends one JSON line to
- * files/config/inbox.jsonl, which services/appSvc.py drains atomically.
+ * The receiver never performs network I/O: it writes one spool file per SMS
+ * into files/config/inbox (.part, then rename to .json), which
+ * services/appSvc.py claims and acknowledges after the Outbox has persisted
+ * the delivery.
  */
 public class SmsReceiver extends BroadcastReceiver {
 
