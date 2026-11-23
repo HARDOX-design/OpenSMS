@@ -95,6 +95,23 @@ Builder.load_string('''
 
             MDListItem:
                 MDListItemLeadingIcon:
+                    icon: "key"
+                MDListItemHeadlineText:
+                    text: "API Key"
+                MDListItemSupportingText:
+                    text: "Generate New API Key"
+                MDListItemTertiaryText:
+                    text: "Old key will not work"
+                MDFabButton:
+                    icon: "autorenew"
+                    style: "small"
+                    theme_bg_color: "Custom"
+                    md_bg_color: "orange"
+                    pos_hint: {'center_y': 0.5}
+                    on_release: app.new_api_key_pop()
+
+            MDListItem:
+                MDListItemLeadingIcon:
                     icon: "webhook"
                 MDListItemHeadlineText:
                     text: "Webhook (Inbound SMS)"
@@ -156,22 +173,7 @@ Builder.load_string('''
                     MDButtonText:
                         text: "Send Test Webhook"
 
-            MDListItem:
-                MDListItemLeadingIcon:
-                    icon: "key"
-                MDListItemHeadlineText:
-                    text: "API Key"
-                MDListItemSupportingText:
-                    text: "Generate New API Key"
-                MDListItemTertiaryText:
-                    text: "Old key will not work"
-                MDFabButton:
-                    icon: "autorenew"
-                    style: "small"
-                    theme_bg_color: "Custom"
-                    md_bg_color: "orange"
-                    pos_hint: {'center_y': 0.5}
-                    on_release: app.new_api_key_pop()
+            
 
 ''')
 
