@@ -9,6 +9,7 @@ on:
       - main
     paths:
       - 'app/**'
+  workflow_dispatch:
 
 # Top-level permissions
 permissions:
