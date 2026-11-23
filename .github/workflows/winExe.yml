@@ -61,8 +61,11 @@ jobs:
         run: |
           cd app
           python --version
-          pip install -r req_cli.txt
-          python -c "import sys; print(sys.executable)"
+          pip install -r req_desktop.txt
+          python -c "
+          import kivy
+          print('Kivy:', kivy.__version__)
+          "
 
       - name: Test CLI imports
         shell: pwsh
@@ -76,12 +79,12 @@ jobs:
           cd app
           pyinstaller --clean --noconfirm desktopCli.spec
 
-      #- name: PyInstaller GUI
-      #  id: 'py_gui'
-      #  shell: pwsh
-      #  run: |
-      #    cd app
-      #    pyinstaller --clean --noconfirm desktopGui.spec
+      - name: PyInstaller GUI
+        id: 'py_gui'
+        shell: pwsh
+        run: |
+          cd app
+          pyinstaller --clean --noconfirm desktopGui.spec
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
@@ -93,4 +96,4 @@ jobs:
           generate_release_notes: true
           files: |
             app/dist/openSmsCli.exe
-          #app/dist/OpenSmsApp.exe
+            app/dist/OpenSmsApp.exe
