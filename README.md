@@ -252,3 +252,6 @@ pip install -r req_android.txt
 # build the android apk
 buildozer android debug # this may take a good amount of time for the first time & will generate the apk in the bin directory
 ```
+
+## 🤝 Contributing to this project
+Lets make a great community & rules are really simple as described [here](./CONTRIBUTE.md).
