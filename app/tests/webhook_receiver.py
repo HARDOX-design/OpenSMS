@@ -10,17 +10,14 @@ app = FastAPI(title="OpenSMS Webhook Receiver")
 
 WEBHOOK_SECRET = os.getenv("OPENSMS_WEBHOOK_SECRET", "")
 
-
 class SimInfo(BaseModel):
-    subscription_id: int
-    slot: int
-
+    subscription_id: Optional[int] = None
+    slot: Optional[int] = None
 
 class WebhookTestPayload(BaseModel):
     event: Literal["webhook.test"]
     delivery_id: str
     sent_at: str
-
 
 class SmsReceivedPayload(BaseModel):
     event: Literal["sms.received"]
@@ -30,8 +27,7 @@ class SmsReceivedPayload(BaseModel):
     sender: str = Field(..., alias="from")
     text: str
     parts: int
-    sim: SimInfo
-
+    sim: Optional[SimInfo] = None
 
 OpenSMSPayload = Annotated[
     Union[WebhookTestPayload, SmsReceivedPayload],
@@ -78,7 +74,9 @@ async def receive_webhook(
         print(f"Text       : {payload.text}")
         print(f"Received At: {payload.received_at}")
         print(f"Parts      : {payload.parts}")
-        print(f"SIM        : Slot {payload.sim.slot} (Sub ID: {payload.sim.subscription_id})")
+        if payload.sim:
+            slot_str = f"Slot {payload.sim.slot}, " if payload.sim.slot is not None else ""
+            print(f"SIM        : {slot_str}Sub ID: {payload.sim.subscription_id}")
     else:
         print("Status     : Test ping received successfully")
 

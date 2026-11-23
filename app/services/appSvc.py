@@ -195,6 +195,9 @@ def serial_conn_control(cmd:str):
 
 def process_inbound_inbox():
     """Forward every inbound SMS claimed from the receiver's spool directory."""
+    if platform != "android":
+        # Works on only android for now.
+        return
     for item in claim_inbox_messages(inbox_dir):
         payload = build_inbound_payload(item["message"])
         log_activities(f"Inbound SMS received from: {payload['from']}")
