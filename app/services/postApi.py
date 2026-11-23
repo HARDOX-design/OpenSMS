@@ -281,7 +281,11 @@ async def process_sms_req(
     return {"stat": stat}
 
 @app.post("/control/")
-async def internal_control(item: ControlData, request: Request):
+async def internal_control(
+    item: ControlData,
+    request: Request,
+    client: dict = Depends(verify_api_key)
+):
     server: PosiApiServer = request.app.state.server
     return item
 

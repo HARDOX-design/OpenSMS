@@ -19,9 +19,20 @@ except ImportError:
         platform = "unknown"
 
 # local imports
-from services.postApi import PosiApiServer, set_api_logger, set_serial_port
+from services.postApi import (
+    PosiApiServer,
+    set_api_logger,
+    set_serial_port,
+    log_activities,
+)
 from services.logSvc import LogService
 from services.config import app_name
+from services.webhookSvc import (
+    WebhookDispatcher,
+    ack_inbox_message,
+    build_inbound_payload,
+    claim_inbox_messages,
+)
 
 # global vars
 resp_template = {
@@ -33,6 +44,10 @@ req_data = {}
 api_started = False
 serial_started = False
 serial_mgr = None
+sms_receiver = None
+sms_receiver_context = None
+sms_register_attempt = 0
+sms_last_attempt = 0.0
 log_obj = LogService(app_name, platform)
 
 running = True
@@ -65,9 +80,19 @@ if not exists(config_dir):
 set_api_logger(log_obj)
 req_file = join(config_dir, "request.json")
 resp_file = join(config_dir, "resp.json")
+inbox_dir = join(config_dir, "inbox")
+outbox_file = join(config_dir, "outbox.json")
+webhook_status_file = join(config_dir, "webhook_status.json")
+app_config_file = join(config_dir, "config.json")
 
 ## global obj
 app_api_server = PosiApiServer()
+webhook_dispatcher = WebhookDispatcher(
+    config_path=app_config_file,
+    outbox_path=outbox_file,
+    status_path=webhook_status_file,
+    log=log_activities,
+)
 
 ## functions
 def write_resp():
@@ -85,6 +110,48 @@ def read_req_file():
                 req_data = json.load(rf)
         except Exception as e:
             print(f"Error while reading config from svc: {e}")
+
+def register_sms_receiver():
+    """Register the Android SMS_RECEIVED receiver in this service process.
+
+    Buildozer ignores `android.extra_manifest_application_xml`, so the receiver
+    cannot be declared in the manifest. Registering it at runtime keeps the
+    receiver alive for as long as the (sticky) service runs.
+    """
+    global sms_receiver, sms_receiver_context, sms_register_attempt
+    if platform != "android" or sms_receiver:
+        return
+    sms_register_attempt += 1
+    try:
+        PythonService = autoclass("org.kivy.android.PythonService")
+        service = PythonService.mService
+        if service is None:
+            return
+        context = service.getApplicationContext()
+        IntentFilter = autoclass("android.content.IntentFilter")
+        SmsReceiver = autoclass("in.daslearning.opensms.SmsReceiver")
+        receiver = SmsReceiver()
+        intent_filter = IntentFilter("android.provider.Telephony.SMS_RECEIVED")
+        context.registerReceiver(receiver, intent_filter)
+        sms_receiver = receiver
+        sms_receiver_context = context
+        print("Inbound SMS receiver registered")
+        log_activities("Inbound SMS receiver registered")
+    except Exception as e:
+        if sms_register_attempt == 1 or sms_register_attempt % 50 == 0:
+            print(f"Could not register the inbound SMS receiver: {e}")
+            log_activities(f"Could not register the inbound SMS receiver: {e}")
+
+def unregister_sms_receiver():
+    global sms_receiver, sms_receiver_context
+    if sms_receiver and sms_receiver_context:
+        try:
+            sms_receiver_context.unregisterReceiver(sms_receiver)
+            print("Inbound SMS receiver unregistered")
+        except Exception as e:
+            print(f"Could not unregister the inbound SMS receiver: {e}")
+    sms_receiver = None
+    sms_receiver_context = None
 
 def api_server_control(api_stat: str):
     """ Turns API server on/off """
@@ -126,19 +193,50 @@ def serial_conn_control(cmd:str):
         Thread(target=write_resp, daemon=True).start()
 
 
+def process_inbound_inbox():
+    """Forward every inbound SMS claimed from the receiver's spool directory."""
+    if platform != "android":
+        # Works on only android for now.
+        return
+    for item in claim_inbox_messages(inbox_dir):
+        payload = build_inbound_payload(item["message"])
+        log_activities(f"Inbound SMS received from: {payload['from']}")
+        try:
+            queued = webhook_dispatcher.enqueue(payload)
+        except Exception as e:
+            # Keep the .processing file so the next tick retries it.
+            print(f"Could not enqueue inbound SMS from {payload['from']}: {e}")
+            continue
+        if queued:
+            print(f"Inbound SMS queued for webhook from: {payload['from']}")
+        else:
+            print(
+                "Inbound SMS not forwarded (webhook disabled or target "
+                f"invalid) from: {payload['from']}"
+            )
+        # Only acknowledge once the Outbox has persisted the delivery.
+        ack_inbox_message(item["path"])
+
+
 def app_service_thread():
     """
     The main service thready runs forever till the app is running & performs the operations.
     """
     #global vars
-    global api_started
+    global api_started, sms_last_attempt
 
+    register_sms_receiver()
     write_resp() # blank the old file
 
     # keep alive the service & check for requests
     try:
         while running:
             read_req_file()
+
+            # retry the SMS receiver until RECEIVE_SMS has been granted
+            if not sms_receiver and time.time() - sms_last_attempt >= 10:
+                sms_last_attempt = time.time()
+                register_sms_receiver()
 
             # handle api server
             server_stat = req_data.get("server", "")
@@ -155,6 +253,9 @@ def app_service_thread():
                 elif serial_started and serial_req == "none":
                     serial_conn_control("stop")
 
+            # forward inbound SMS to the configured webhook
+            process_inbound_inbox()
+
             # put a sleep
             time.sleep(0.2)
     # Exceptions and closure
@@ -164,6 +265,8 @@ def app_service_thread():
         # Stop the API server if it is still running
         if api_started:
             api_server_control("stop")
+        unregister_sms_receiver()
+        webhook_dispatcher.stop()
         print("OpenSMS service stopped")
 
 

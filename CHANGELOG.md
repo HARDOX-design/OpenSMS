@@ -2,6 +2,15 @@
 
 ## Changes
 
+### 1.1.0
+- Forward received SMS to a configurable webhook (Android), with optional HMAC-SHA256 signing, ordered delivery, retries and a persisted outbox. See the [README](./README.md#-receiving-sms-android).
+- Show the last webhook delivery result and a test button in Settings; log inbound SMS and delivery outcomes.
+- Request the `RECEIVE_SMS` permission.
+
+### 1.0.1
+- Adding athentication on `/control` path (not in use as of now).
+- Some cleanups.
+
 ### 1.0.0
 - Adding Desktop support via [EC200U Module](https://www.quectel.com/product/lte-ec200u-series/) and technically should work with other such modules via the `AT` commands.
 - Both CLI & GUI can be used from Desktop platform. See the [README](./README.md) for more details.
