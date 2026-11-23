@@ -191,6 +191,9 @@ expected = "sha256=" + hmac.new(
 assert hmac.compare_digest(expected, request.headers["X-OpenSMS-Signature"])
 ```
 
+### Test / Self-host the webhook
+If you wanted to just try the webhook, you may quickly do so using this [guide](./docs/webhook/receiver_test.md) or if you want to self-host it you may use [opensms-inbox](https://github.com/japperJ/opensms-inbox).
+
 ### Things to know
 
 - The URL must be reachable **from the phone**. For a LAN target, keep the phone on the same network.

@@ -1,6 +1,9 @@
 # Webhook receiver (simple)
 A simple receiver to test webhook manually. It acts as a receiving server.
 
+## Code path
+Here is the [code](../../app/tests/webhook_receiver.py)
+
 ## Install dependencies
 ```bash
 pip install fastapi uvicorn
@@ -8,6 +11,7 @@ pip install fastapi uvicorn
 
 ## Run the receiver
 ```bash
+cd to-your-code-path/
 uvicorn webhook_receiver:app --host 0.0.0.0 --port 8000 --reload
 ```
 
