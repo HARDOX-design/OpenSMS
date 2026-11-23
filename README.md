@@ -16,6 +16,7 @@ An open-source cross-platform solution to host a `SMS` API server locally.
 
 ### 🤔 Why would you choose our app? (Features)
 👉 Turns your `Android` phone into a SMS API server. <br>
+👉 Forward received SMS to your own HTTP endpoint (webhook). <br>
 👉 Also available on `Desktop` platforms via [EC200U](https://www.quectel.com/product/lte-ec200u-series/) or similar USB development boards. <br>
 👉 Open-source, No advertisements and privacy focused.
 
@@ -131,6 +132,78 @@ curl -i -X POST 'http://127.0.0.1:9292/sms/' \
     -d '{"number": "+1234567890", "text": "Hello from OpenSMS API!"}'
 ```
 
+## 📥 Receiving SMS (Android)
+
+OpenSMS can forward every SMS received by the phone to your own HTTP endpoint as a webhook. Receiving works independently of the API server: it runs in the same background service, so the API can be stopped while webhooks keep flowing.
+
+### Configure it
+
+1. Open `Settings` and find the **Webhook (Inbound SMS)** section.
+2. Enter the **Webhook URL** (`http://` or `https://`).
+3. Optionally set a **Signing Secret** to sign every request.
+4. Enable the switch and tap **Save**.
+5. Tap **Send Test Webhook** to check the endpoint. This sends `event: "webhook.test"`.
+
+Settings take effect immediately; no restart is needed. The last delivery result is shown under the webhook settings and in the `Logs` screen.
+
+### Request format
+
+Every Inbound SMS produces one `POST` with a JSON body:
+
+```http
+POST /your-hook HTTP/1.1
+Content-Type: application/json
+User-Agent: OpenSMS/1.1.0
+X-OpenSMS-Event: sms.received
+X-OpenSMS-Delivery: 6f1c2f5e-0d7a-4c55-9f0e-2b1c8b7f0a11
+X-OpenSMS-Signature: sha256=...
+```
+
+```json
+{
+  "event": "sms.received",
+  "delivery_id": "6f1c2f5e-0d7a-4c55-9f0e-2b1c8b7f0a11",
+  "received_at": "2026-11-19T14:32:10+05:30",
+  "sent_at": "2026-11-19T09:01:58+00:00",
+  "from": "+14155552671",
+  "text": "Hello from a real SMS",
+  "parts": 1,
+  "sim": {"subscription_id": 1, "slot": 0}
+}
+```
+
+- `from` is the raw originating address. It can be an alphanumeric sender ID (for example `BANKALERT`), not only an E.164 number.
+- `sent_at` is the SMS centre timestamp and may be `null`. `received_at` is when the phone received it.
+- A multipart SMS is delivered as **one** webhook with the parts joined in `text` and counted in `parts`.
+- `sim` is included only when the subscription can be determined.
+
+A `2xx` response means delivered. Anything else (or a timeout after 10 seconds) is retried twice (after 5s and 30s); after three failed attempts the delivery is logged as failed. Redirects are not followed and count as failures. Pending webhooks are kept on disk and survive restarts. At most 100 are queued; when full, the oldest is dropped. Delivery is at-least-once: a crash immediately after persisting a delivery can produce a duplicate, but never a silent loss.
+
+### Verify the signature
+
+When a signing secret is set, `X-OpenSMS-Signature` is `sha256=` followed by the hex HMAC-SHA256 of the **raw request body**:
+
+```python
+import hashlib, hmac
+expected = "sha256=" + hmac.new(
+    b"your-secret", raw_body, hashlib.sha256
+).hexdigest()
+assert hmac.compare_digest(expected, request.headers["X-OpenSMS-Signature"])
+```
+
+### Things to know
+
+- The URL must be reachable **from the phone**. For a LAN target, keep the phone on the same network.
+- Receiving works while the background service is running (it survives closing the app) but there is **no auto-start after reboot** yet. Start OpenSMS once after rebooting the phone.
+- OpenSMS is not the default SMS app. Your normal messaging app still receives messages. Some OEM battery managers may block background SMS delivery; allow OpenSMS to run in the background if webhooks stop arriving.
+- Only SMS is forwarded, not MMS.
+- GCM/Play policy does not apply here; the app is distributed as an APK, but `RECEIVE_SMS` is a sensitive permission, so the "restricted settings" step from the Android install guide is required on newer versions.
+
+### 📬 Companion inbox
+
+If you do not want to build your own receiver, [OpenSMS Inbox](https://github.com/japperJ/opensms-inbox) is a small self-hosted FastAPI + SQLite web inbox. It verifies the signature, stores messages, and provides search, detail and delete. Point the Webhook URL at `http://<your-host>:8099/hook`.
+
+
 ## 📚 Tech Stack Used
 
 ### Python stack
@@ -168,6 +241,10 @@ sudo apt install -y ant autoconf automake ccache cmake g++ gcc lbzip2 libffi-dev
 # optionally you may check the java installation with below commands
 java -version
 javac -version
+
+# Rust is needed to build pydantic-core for Android (use rustup, not the distro rust package)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+source "$HOME/.cargo/env"
 
 # install python modules
 git clone https://github.com/daslearning-org/OpenSMS.git
