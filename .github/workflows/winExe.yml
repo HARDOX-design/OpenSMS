@@ -29,10 +29,9 @@ jobs:
         id: 'git-checkout'
         uses: "actions/checkout@v4"
 
-      #- name: Install Dependencies
-      #  id: 'install_prereq'
-      #  run: |
-      #    # <command>
+      # 1. Install Mesa3D so the headless runner supports OpenGL 2.0+
+      - name: Setup Mesa3D for OpenGL 2.0+
+        uses: ssciwr/setup-mesa-dist-win@v3
 
       - name: Set version
         id: 'set_version'
@@ -65,24 +64,6 @@ jobs:
           pip install -r req_cli.txt
           python -c "import sys; print(sys.executable)"
 
-      #- name: Configure Windows graphics backend
-      #  shell: pwsh
-      #  run: |
-      #    cd app
-      #    (Get-Content main.py -Raw).Replace(
-      #      "os.environ['KIVY_GL_BACKEND'] = 'sdl2'",
-      #      "os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'"
-      #    ) | Set-Content main.py -NoNewline
-      #    Get-Content main.py | Select-Object -First 5
-
-      #- name: Check Windows graphics environment
-      #  shell: pwsh
-      #  run: |
-      #    cd app
-      #    Get-CimInstance Win32_VideoController |
-      #      Format-Table Name, DriverVersion, Status
-      #    python -c "import os; os.environ['KIVY_GL_BACKEND']='angle_sdl2'; from kivy.core.window import Window; print(Window)"
-
       - name: Test CLI imports
         shell: pwsh
         run: |
@@ -100,13 +81,7 @@ jobs:
       #  shell: pwsh
       #  run: |
       #    cd app
-      #    $env:KIVY_GL_BACKEND = "sdl2"
       #    pyinstaller --clean --noconfirm desktopGui.spec
-
-      #- name: Upload artifact
-      #  uses: actions/upload-pages-artifact@v3
-      #  with:
-      #    path: './flasher'
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
