@@ -99,9 +99,9 @@ Builder.load_string('''
                 MDListItemHeadlineText:
                     text: "API Key"
                 MDListItemSupportingText:
-                    text: "Generate New API Key"
+                    text: "Replace this phone's API key"
                 MDListItemTertiaryText:
-                    text: "Old key will not work"
+                    text: "Other API keys keep working"
                 MDFabButton:
                     icon: "autorenew"
                     style: "small"

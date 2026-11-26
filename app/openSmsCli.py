@@ -101,7 +101,7 @@ class OpenSmsCliCls:
         print("Available commands: newkey, status, help, quit\n")
         help_cmd = """
         Available commands:
-          newkey   - Generate New API Key
+          newkey   - Replace this phone's API key
           status   - Show service status
           help     - Show available commands
           quit     - Stop OpenSMS
@@ -116,7 +116,7 @@ class OpenSmsCliCls:
                     break
 
                 elif cmd == "newkey":
-                    confirmation = input("Old key will be invalid, are you sure (y/n) > ").strip().lower()
+                    confirmation = input("This phone's key will be replaced; other keys keep working. Are you sure (y/n) > ").strip().lower()
                     if confirmation == "y":
                         self.new_api_key()
 

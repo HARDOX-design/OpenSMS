@@ -1357,3 +1357,316 @@ class ControlRouteTests(ApiTestCase):
         )
 
         self.assertEqual(response.status_code, 404)
+
+
+class KeyCreateTests(ApiTestCase):
+
+    def create_key(self, raw_key: str, payload: dict):
+        return self.client.post(
+            "/api/keys", json=payload, headers=self.auth(raw_key)
+        )
+
+    def test_create_returns_the_key_once_and_it_authenticates_immediately(self):
+        admin = self.add_api_key(name="admin")
+
+        response = self.create_key(admin, {"name": "  sms-proxy  "})
+
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertEqual(body["name"], "sms-proxy")
+        self.assertRegex(body["id"], r"^k_[0-9a-f]{8}$")
+        self.assertEqual(body["scopes"], ["settings:write", "sms:write"])
+        self.assertTrue(body["created_at"])
+        self.assertTrue(body["key"].startswith("osms_"))
+        self.assertNotIn("hash", body)
+
+        health = self.client.get("/api/health", headers=self.auth(body["key"]))
+        self.assertEqual(health.status_code, 200)
+
+    def test_scopes_are_an_optional_subset(self):
+        admin = self.add_api_key(name="admin")
+
+        response = self.create_key(
+            admin, {"name": "sender", "scopes": ["sms:write"]}
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["scopes"], ["sms:write"])
+        key = response.json()["key"]
+        self.assertEqual(
+            self.client.post(
+                "/sms/",
+                json={"number": "+14155552671", "text": "hello"},
+                headers=self.auth(key),
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.get(
+                "/api/settings", headers=self.auth(key)
+            ).status_code,
+            403,
+        )
+
+    def test_an_empty_or_unknown_scope_set_is_rejected(self):
+        admin = self.add_api_key(name="admin")
+
+        cases = {
+            "empty list": [],
+            "null": None,
+            "unknown scope": ["sms:read"],
+            "mixed unknown": ["sms:write", "admin"],
+            "not a list": "sms:write",
+        }
+        for name, scopes in cases.items():
+            with self.subTest(name):
+                response = self.create_key(
+                    admin, {"name": "bad-scopes", "scopes": scopes}
+                )
+
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIsInstance(response.json()["detail"], str)
+
+    def test_a_duplicate_name_differing_only_by_case_is_refused(self):
+        admin = self.add_api_key(name="admin")
+        first = self.create_key(admin, {"name": "sms-proxy"})
+        self.assertEqual(first.status_code, 201)
+
+        response = self.create_key(admin, {"name": "SMS-Proxy"})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIsInstance(response.json()["detail"], str)
+
+    def test_names_are_trimmed_and_length_checked(self):
+        admin = self.add_api_key(name="admin")
+
+        cases = {
+            "too short": "a",
+            "blank": "   ",
+            "too long": "x" * 65,
+            "control character": "bad\nname",
+            "C1 control character": "bad\u0085name",
+            "line separator": "bad\u2028name",
+            "not a string": 42,
+        }
+        for name, value in cases.items():
+            with self.subTest(name):
+                response = self.create_key(admin, {"name": value})
+
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIsInstance(response.json()["detail"], str)
+
+    def test_create_rejects_unknown_fields_and_a_non_object_body(self):
+        admin = self.add_api_key(name="admin")
+
+        response = self.create_key(
+            admin, {"name": "proxy", "unexpected": True}
+        )
+        self.assertEqual(response.status_code, 422)
+
+        response = self.client.post(
+            "/api/keys", json=["not", "an", "object"],
+            headers=self.auth(admin),
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_create_requires_authentication_and_the_settings_scope(self):
+        response = self.client.post(
+            "/api/keys", json={"name": "proxy"}
+        )
+        self.assertEqual(response.status_code, 403)
+
+        sender = self.add_api_key(name="sender", scopes=("sms:write",))
+        response = self.create_key(sender, {"name": "proxy"})
+        self.assertEqual(response.status_code, 403)
+
+    def test_the_stored_key_is_hashed_and_never_returned_again(self):
+        admin = self.add_api_key(name="admin")
+        created = self.create_key(admin, {"name": "proxy"}).json()
+
+        store = self.read_key_store()
+        entry = next(
+            key for key in store["keys"] if key["id"] == created["id"]
+        )
+        self.assertEqual(entry["hash"], postApi.hash_api_key(created["key"]))
+        self.assertEqual(entry["scopes"], ["settings:write", "sms:write"])
+        self.assertNotIn(created["key"], json.dumps(store))
+
+
+class KeyListTests(ApiTestCase):
+
+    def test_list_never_returns_hashes(self):
+        admin = self.add_api_key(name="admin")
+        created = self.client.post(
+            "/api/keys", json={"name": "proxy"}, headers=self.auth(admin)
+        ).json()
+
+        response = self.client.get("/api/keys", headers=self.auth(admin))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(len(body["keys"]), 2)
+        entry = next(
+            key for key in body["keys"] if key["id"] == created["id"]
+        )
+        self.assertEqual(entry, {
+            "id": created["id"],
+            "name": "proxy",
+            "scopes": ["settings:write", "sms:write"],
+            "created_at": created["created_at"],
+        })
+        self.assertNotIn("hash", response.text)
+        self.assertNotIn(created["key"], response.text)
+
+    def test_list_requires_authentication_and_the_settings_scope(self):
+        response = self.client.get("/api/keys")
+        self.assertEqual(response.status_code, 403)
+
+        sender = self.add_api_key(name="sender", scopes=("sms:write",))
+        response = self.client.get("/api/keys", headers=self.auth(sender))
+        self.assertEqual(response.status_code, 403)
+
+
+class KeyDeleteTests(ApiTestCase):
+
+    def delete(self, raw_key: str, key_id: str):
+        return self.client.delete(
+            f"/api/keys/{key_id}", headers=self.auth(raw_key)
+        )
+
+    def test_delete_takes_effect_immediately(self):
+        admin = self.add_api_key(name="admin")
+        created = self.client.post(
+            "/api/keys", json={"name": "proxy"}, headers=self.auth(admin)
+        ).json()
+        key = created["key"]
+
+        response = self.delete(admin, created["id"])
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(
+            self.client.get("/api/health", headers=self.auth(key)).status_code,
+            401,
+        )
+
+    def test_an_unknown_or_malformed_id_is_not_found(self):
+        admin = self.add_api_key(name="admin")
+        self.add_api_key(name="other")
+
+        for key_id in ("k_deadbeef", "not-an-id", "k_xyz"):
+            with self.subTest(key_id):
+                response = self.delete(admin, key_id)
+
+                self.assertEqual(response.status_code, 404)
+
+    def test_deleting_the_last_remaining_key_is_refused(self):
+        only_key = self.add_api_key(name="only")
+        key_id = self.read_key_store()["keys"][0]["id"]
+
+        response = self.delete(only_key, key_id)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIsInstance(response.json()["detail"], str)
+        self.assertEqual(
+            self.client.get(
+                "/api/health", headers=self.auth(only_key)
+            ).status_code,
+            200,
+        )
+
+    def test_the_caller_can_delete_its_own_key_while_another_remains(self):
+        first = self.add_api_key(name="first")
+        second = self.add_api_key(name="second")
+        first_id = next(
+            key["id"] for key in self.read_key_store()["keys"]
+            if key["name"] == "first"
+        )
+
+        response = self.delete(first, first_id)
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(
+            self.client.get(
+                "/api/health", headers=self.auth(first)
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get(
+                "/api/health", headers=self.auth(second)
+            ).status_code,
+            200,
+        )
+
+    def test_delete_requires_authentication_and_the_settings_scope(self):
+        admin = self.add_api_key(name="admin")
+        other = self.add_api_key(name="other")
+        other_id = next(
+            key["id"] for key in self.read_key_store()["keys"]
+            if key["name"] == "other"
+        )
+
+        self.assertEqual(
+            self.client.delete(f"/api/keys/{other_id}").status_code, 403
+        )
+
+        sender = self.add_api_key(name="sender", scopes=("sms:write",))
+        self.assertEqual(
+            self.delete(sender, other_id).status_code, 403
+        )
+        self.assertEqual(
+            self.client.get(
+                "/api/health", headers=self.auth(other)
+            ).status_code,
+            200,
+        )
+
+
+class PhoneKeyRotationTests(ApiTestCase):
+
+    def test_rotation_replaces_only_the_phone_key(self):
+        old_phone = self.add_api_key(name="opensms")
+        proxy = self.add_api_key(name="sms-proxy")
+
+        new_phone = postApi.generate_new_api_key()
+
+        self.assertEqual(
+            self.client.get(
+                "/api/health", headers=self.auth(old_phone)
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get(
+                "/api/health", headers=self.auth(new_phone)
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.get(
+                "/api/health", headers=self.auth(proxy)
+            ).status_code,
+            200,
+        )
+        names = [key["name"] for key in self.read_key_store()["keys"]]
+        self.assertEqual(names.count("opensms"), 1)
+        self.assertIn("sms-proxy", names)
+
+    def test_rotation_adds_a_phone_key_without_touching_proxy_keys(self):
+        proxy = self.add_api_key(name="sms-proxy")
+
+        new_phone = postApi.generate_new_api_key()
+
+        self.assertEqual(
+            self.client.get(
+                "/api/health", headers=self.auth(new_phone)
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.get(
+                "/api/health", headers=self.auth(proxy)
+            ).status_code,
+            200,
+        )
+        self.assertEqual(len(self.read_key_store()["keys"]), 2)

@@ -1,4 +1,5 @@
 import hashlib
+import re
 import secrets
 import asyncio
 import time
@@ -42,6 +43,25 @@ sms_api = SmsCrossPlatform()
 # API key scopes
 SCOPE_SEND = "sms:write"
 SCOPE_SETTINGS = "settings:write"
+
+VALID_SCOPES = frozenset({SCOPE_SEND, SCOPE_SETTINGS})
+PHONE_KEY_NAME = "opensms"
+KEY_NAME_MIN = 2
+KEY_NAME_MAX = 64
+_KEY_ID_PATTERN = re.compile(r"^k_[0-9a-f]{8}$")
+_SCOPE_ERROR = (
+    "scopes must be a non-empty subset of: "
+    + ", ".join(sorted(VALID_SCOPES))
+)
+_DEFAULT_SCOPES = object()
+
+
+class KeyValidationError(ValueError):
+    """A malformed key request (HTTP 422)."""
+
+
+class KeyConflict(Exception):
+    """A key request that conflicts with the stored keys (HTTP 409)."""
 
 # Test seam: tests point the API at a temporary config directory so they never
 # read or write the real app data directory.
@@ -174,7 +194,7 @@ def _migrate_v1_keys(raw: dict) -> list:
         scopes.update({SCOPE_SEND, SCOPE_SETTINGS})
         keys.append({
             "id": f"k_{secrets.token_hex(4)}",
-            "name": str(info.get("name") or "opensms"),
+            "name": str(info.get("name") or PHONE_KEY_NAME),
             "hash": str(key_hash),
             "scopes": sorted(scopes),
             "created_at": _now_iso(),
@@ -217,22 +237,130 @@ def has_api_keys() -> bool:
     store, _ = load_key_store()
     return bool(store["keys"])
 
+def _normalize_key_name(value) -> str:
+    if not isinstance(value, str):
+        raise KeyValidationError("name must be a string")
+    name = value.strip()
+    if not KEY_NAME_MIN <= len(name) <= KEY_NAME_MAX:
+        raise KeyValidationError(
+            f"name must be {KEY_NAME_MIN}-{KEY_NAME_MAX} characters"
+        )
+    if not name.isprintable():
+        raise KeyValidationError("name must not contain control characters")
+    return name
+
+def _normalize_key_scopes(value) -> list:
+    if not isinstance(value, list):
+        raise KeyValidationError("scopes must be a list")
+    scopes = set()
+    for scope in value:
+        if not isinstance(scope, str) or scope not in VALID_SCOPES:
+            raise KeyValidationError(_SCOPE_ERROR)
+        scopes.add(scope)
+    if not scopes:
+        raise KeyValidationError(_SCOPE_ERROR)
+    return sorted(scopes)
+
+def _new_key_entry(name: str, scopes, raw_key: str) -> dict:
+    return {
+        "id": f"k_{secrets.token_hex(4)}",
+        "name": name,
+        "hash": hash_api_key(raw_key),
+        "scopes": sorted(scopes),
+        "created_at": _now_iso(),
+    }
+
+def _new_raw_key() -> str:
+    return f"osms_{secrets.token_urlsafe(32)}"
+
+def public_key(entry: dict) -> dict:
+    """The listable shape of a key: never the hash or the raw key."""
+    scopes = entry.get("scopes")
+    if not isinstance(scopes, list):
+        scopes = []
+    return {
+        "id": entry.get("id"),
+        "name": entry.get("name"),
+        "scopes": list(scopes),
+        "created_at": entry.get("created_at"),
+    }
+
+def create_api_key(name, scopes=_DEFAULT_SCOPES) -> dict:
+    """Create a named key; the raw key is returned only in this result."""
+    name = _normalize_key_name(name)
+    normalized_scopes = (
+        sorted(VALID_SCOPES)
+        if scopes is _DEFAULT_SCOPES
+        else _normalize_key_scopes(scopes)
+    )
+    raw_key = _new_raw_key()
+    with _key_lock:
+        store, _ = load_key_store()
+        for entry in store["keys"]:
+            existing_name = entry.get("name")
+            if (
+                isinstance(existing_name, str)
+                and existing_name.casefold() == name.casefold()
+            ):
+                raise KeyConflict(f"An API key named {name} already exists")
+        entry = _new_key_entry(name, normalized_scopes, raw_key)
+        store["keys"].append(entry)
+        save_key_store(store)
+    log_activities(f"API key created: {name}")
+    return {**public_key(entry), "key": raw_key}
+
+def list_api_keys() -> list:
+    """Every key without its hash or raw value."""
+    store, _ = load_key_store()
+    return [public_key(entry) for entry in store["keys"]]
+
+def delete_api_key(key_id: str) -> bool:
+    """Delete a key by id, returning False when it does not exist.
+
+    Raises KeyConflict when deleting it would leave no key at all.
+    """
+    if not isinstance(key_id, str) or not _KEY_ID_PATTERN.fullmatch(key_id):
+        return False
+    with _key_lock:
+        store, _ = load_key_store()
+        keys = store["keys"]
+        index = next(
+            (
+                position
+                for position, entry in enumerate(keys)
+                if entry.get("id") == key_id
+            ),
+            None,
+        )
+        if index is None:
+            return False
+        if len(keys) <= 1:
+            raise KeyConflict("The last remaining API key cannot be deleted")
+        removed = keys.pop(index)
+        save_key_store(store)
+    log_activities(f"API key deleted: {removed.get('name')}")
+    return True
+
+def rotate_phone_key() -> str:
+    """Replace only the phone-owned key, leaving proxy-owned keys intact."""
+    raw_key = _new_raw_key()
+    with _key_lock:
+        store, _ = load_key_store()
+        store["keys"] = [
+            entry for entry in store["keys"]
+            if str(entry.get("name") or "").casefold() != PHONE_KEY_NAME
+        ]
+        store["keys"].append(
+            _new_key_entry(PHONE_KEY_NAME, VALID_SCOPES, raw_key)
+        )
+        save_key_store(store)
+    print("Replaced the phone API key")
+    log_activities("Replaced the phone API key")
+    return raw_key
+
 def generate_new_api_key() -> str:
-    # Generate a high-entropy secret token
-    new_raw_key = f"osms_{secrets.token_urlsafe(32)}"
-    save_key_store({
-        "version": 2,
-        "keys": [{
-            "id": f"k_{secrets.token_hex(4)}",
-            "name": "opensms",
-            "hash": hash_api_key(new_raw_key),
-            "scopes": sorted({SCOPE_SEND, SCOPE_SETTINGS}),
-            "created_at": _now_iso(),
-        }],
-    })
-    print("Created/updated the API key")
-    log_activities("Created/updated the API key")
-    return new_raw_key
+    """Backwards-compatible entry point for rotating the phone key."""
+    return rotate_phone_key()
 
 
 
@@ -655,6 +783,72 @@ async def api_put_settings(
         **_settings_body(saved),
         "restart_required": _restart_required(saved),
     }
+
+KEY_REQUEST_FIELDS = {"name", "scopes"}
+
+
+async def _key_request_body(request: Request) -> dict:
+    """Validate the shape of a key-creation body, before touching the store."""
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=422,
+            detail="Request body must be valid JSON",
+        )
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="Request body must be a JSON object",
+        )
+    unknown = set(payload) - KEY_REQUEST_FIELDS
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown field(s) in request: {', '.join(sorted(unknown))}",
+        )
+    if "name" not in payload:
+        raise HTTPException(
+            status_code=422,
+            detail="Missing required field: name",
+        )
+    return payload
+
+
+@app.post("/api/keys", status_code=201)
+async def api_create_key(
+    request: Request,
+    client: dict = Depends(require_scope(SCOPE_SETTINGS))
+):
+    payload = await _key_request_body(request)
+    try:
+        return create_api_key(
+            payload["name"], payload.get("scopes", _DEFAULT_SCOPES)
+        )
+    except KeyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except KeyValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.get("/api/keys")
+async def api_list_keys(
+    client: dict = Depends(require_scope(SCOPE_SETTINGS))
+):
+    return {"keys": list_api_keys()}
+
+
+@app.delete("/api/keys/{key_id}", status_code=204)
+async def api_delete_key(
+    key_id: str,
+    client: dict = Depends(require_scope(SCOPE_SETTINGS))
+):
+    try:
+        deleted = delete_api_key(key_id)
+    except KeyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="API key not found")
 
 WEBHOOK_TEST_FIELDS = {"url", "secret"}
 

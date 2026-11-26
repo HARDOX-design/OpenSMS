@@ -523,7 +523,7 @@ class OpenSmsApp(MDApp):
             ),
             MDButton(
                 MDButtonText(
-                    text="Generate",
+                    text="Replace",
                     theme_text_color= "Custom",
                     text_color= "green"
                 ),
@@ -533,8 +533,8 @@ class OpenSmsApp(MDApp):
             spacing="8dp",
         )
         self.show_text_dialog(
-            "Generate API Key",
-            "Do you want to generate the a new API key? This will make old keys invalid.",
+            "Replace API Key",
+            "Do you want to replace this phone's API key? The old key for this phone stops working; other API keys keep working.",
             None,
             buttons
         )

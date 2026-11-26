@@ -87,7 +87,7 @@ You may need to run this first to generate the first API Key.
 ```bash
 python openSmsCli.py interactive --serial /dev/ttyUSB0 # change your serial port, on windows: COM1 (example)
 
-# generate a new API key
+# replace this phone's API key (other keys keep working)
 newkey
 
 # get other interactive commands
