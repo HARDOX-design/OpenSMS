@@ -9,6 +9,7 @@ import hmac
 import json
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -16,13 +17,19 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from urllib import error as urlerror
 from urllib import request as urlrequest
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse, urlunparse
 
 from services.config import __version__
 
 # Public contract values
 EVENT_INBOUND = "sms.received"
 EVENT_TEST = "webhook.test"
+
+_WEBHOOK_URL_IN_ERROR = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+_INVALID_TARGET_ERROR = (
+    "Webhook target must be a valid http(s) URL without credentials"
+)
+VALID_TARGET_SCHEMES = ("http", "https")
 
 # Delivery semantics (see docs/adr/0001-inbound-sms-webhook.md)
 DEFAULT_TIMEOUT = 10
@@ -116,14 +123,71 @@ def get_webhook_config(config_path: str) -> dict:
         return default_webhook_config()
     return normalize_webhook_config(app_config.get("webhook"))
 
-def is_valid_target(url: str) -> bool:
+def _parse_target(url: str) -> ParseResult | None:
     if not isinstance(url, str):
-        return False
+        return None
     try:
-        parsed = urlparse(url.strip())
+        return urlparse(url.strip())
     except ValueError:
+        return None
+
+
+def _parsed_has_credentials(parsed: ParseResult) -> bool:
+    return parsed.username is not None or parsed.password is not None
+
+
+def _malformed_authority_has_credentials(url: str) -> bool:
+    """Detect userinfo even when urlparse rejects the authority."""
+    scheme, separator, remainder = url.strip().partition("://")
+    if not separator or scheme.lower() not in VALID_TARGET_SCHEMES:
         return False
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    for delimiter in ("/", "?", "#"):
+        remainder = remainder.split(delimiter, 1)[0]
+    return "@" in remainder
+
+
+def has_target_credentials(url: str) -> bool:
+    """Whether an HTTP(S) target carries URL userinfo, even an empty value."""
+    parsed = _parse_target(url)
+    if parsed is not None:
+        return _parsed_has_credentials(parsed)
+    return isinstance(url, str) and _malformed_authority_has_credentials(url)
+
+
+def redact_target_credentials(url: str) -> str:
+    """Return a display-safe target without echoing URL userinfo.
+
+    The persisted value is not changed. A malformed value is omitted rather
+    than risking the echo of credentials that cannot be parsed reliably.
+    """
+    parsed = _parse_target(url)
+    if parsed is None:
+        return ""
+    if not _parsed_has_credentials(parsed):
+        return url
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def target_host(url: str) -> str | None:
+    """Return only the parsed host, never userinfo, path, query, or fragment."""
+    parsed = _parse_target(url)
+    if parsed is None:
+        return None
+    try:
+        return parsed.hostname
+    except ValueError:
+        return None
+
+
+def is_valid_target(url: str) -> bool:
+    parsed = _parse_target(url)
+    return (
+        parsed is not None
+        and parsed.scheme in VALID_TARGET_SCHEMES
+        and bool(parsed.netloc)
+        and not _parsed_has_credentials(parsed)
+    )
 
 ## Payload
 
@@ -218,6 +282,8 @@ _opener = urlrequest.build_opener(_NoRedirect())
 
 def post_json(url: str, body: bytes, headers: dict, timeout: float) -> tuple:
     """POST once. Returns (ok, http_status, error_message)."""
+    if not is_valid_target(url):
+        return False, None, _INVALID_TARGET_ERROR
     try:
         req = urlrequest.Request(url, data=body, headers=headers, method="POST")
     except Exception as exc:
@@ -255,6 +321,17 @@ def read_webhook_status(status_path: str) -> dict | None:
     except Exception:
         return None
 
+def scrub_webhook_error(error: str) -> str:
+    """Remove credentialed target URLs from human-readable delivery errors."""
+    def replace(match: re.Match[str]) -> str:
+        target = match.group(0)
+        if has_target_credentials(target):
+            return "<webhook target>"
+        return target
+
+    return _WEBHOOK_URL_IN_ERROR.sub(replace, error)
+
+
 def format_webhook_status(status: dict | None) -> str:
     if not status:
         return "No deliveries yet"
@@ -262,6 +339,8 @@ def format_webhook_status(status: dict | None) -> str:
     if status.get("ok"):
         return f"Last delivery: delivered (HTTP {status.get('http_status')}) at {when}"
     error = status.get("error") or "failed"
+    if isinstance(error, str):
+        error = scrub_webhook_error(error)
     if error == "webhook disabled":
         return f"Last delivery: not sent (webhook disabled) at {when}"
     attempts = status.get("attempts", 0)
@@ -488,6 +567,9 @@ class WebhookDispatcher:
             config = get_webhook_config(self.config_path)
             if not config["enabled"]:
                 return False, status, "webhook disabled", False
+            target = record.get("url")
+            if not isinstance(target, str) or not is_valid_target(target):
+                return False, status, _INVALID_TARGET_ERROR, False
             max_attempts = self._max_attempts_for(config)
             if attempt > max_attempts:
                 return False, status, "retry limit reached", False

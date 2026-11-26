@@ -139,7 +139,7 @@ OpenSMS can forward every SMS received by the phone to your own HTTP endpoint as
 ### Configure it
 
 1. Open `Settings` and find the **Webhook (Inbound SMS)** section.
-2. Enter the **Webhook URL** (`http://` or `https://`).
+2. Enter the **Webhook target** (`http://` or `https://`) without `username:password@` userinfo.
 3. Optionally set a **Signing Secret** to sign every request.
 4. Enable the switch and tap **Save**.
 5. Tap **Send Test Webhook** to check the endpoint. This sends `event: "webhook.test"`.

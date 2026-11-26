@@ -51,6 +51,7 @@ from services.webhookSvc import (
     normalize_webhook_config,
     read_webhook_status,
     send_test_webhook,
+    target_host,
 )
 
 # IMPORTANT: Set this property for keyboard behaviour
@@ -234,7 +235,7 @@ class OpenSmsApp(MDApp):
                 f"port={self.config_template['port']}, "
                 f"boot={self.config_template['boot']}, "
                 f"webhook enabled={webhook_cfg['enabled']}, "
-                f"target={webhook_cfg['url']}"
+                f"target={target_host(webhook_cfg['url']) or 'unknown'}"
             )
             self.req_template["port"] = int(self.config_template["port"])
             start_on_launch = self.config_template["boot"]

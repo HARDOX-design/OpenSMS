@@ -140,8 +140,9 @@ See `GLOSSARY.md`: **Settings**, **Revision**, **Scope**, **API key**,
   - `409` conflict (stale revision, last key, restart debounce/stopped)
   - `422` schema/range/unknown-field violation
   - `502` webhook test delivery failed
-- Never return: webhook secret, key hashes, raw keys after creation, full
-  webhook URL with credentials.
+- Never return: webhook secret, key hashes, raw keys after creation, a full
+  Webhook target with credentials. A legacy target's userinfo is removed from
+  Settings responses without changing the stored value.
 
 ### 6.2 `GET /api/health`
 
@@ -192,7 +193,8 @@ Rules:
   `{"code": "network_unavailable"}`.
 - `webhook.url_host`: `urlparse(url).hostname`, `null` if empty. Never path,
   query, or credentials.
-- `last_delivery`: `null` when no status file.
+- `last_delivery`: `null` when no status file. Credentialed target URLs and
+  details of the current target are scrubbed from its error text.
 - `outbox_pending`: provider value, `null` when unavailable.
 - `warnings` is always an array. Codes:
   - `webhook_disabled` — accepted but every new Inbound SMS is discarded, with
@@ -222,7 +224,9 @@ Rules:
 }
 ```
 
-Never include `permissions`, `app`, or the raw secret.
+Never include `permissions`, `app`, or the raw secret. If a stored legacy
+target contains URL userinfo, `webhook.url` is returned with that userinfo
+removed; the persisted value remains unchanged and invalid for forwarding.
 
 ### 6.5 `PUT /api/settings`
 
@@ -259,7 +263,7 @@ Validation:
 | `port` | integer, `1025 <= port <= 65535` | `422` |
 | `boot` | JSON boolean | `422` |
 | `webhook.enabled` | JSON boolean | `422` |
-| `webhook.url` | string; required; valid `http(s)://host[:port]/path` when `enabled` is true; may be `""` when disabled | `422` if wrong type; `400` if enabled and invalid/empty |
+| `webhook.url` | string; required; credential-free valid `http(s)://host[:port]/path` when `enabled` is true; may be `""` when disabled; URL userinfo is always rejected | `422` if wrong type; `400` if enabled and invalid/empty or if userinfo is present |
 | `webhook.secret` | string, ≤ 256 chars, sentinel semantics | `422` |
 | `webhook.timeout` | integer 1–60 (seconds) | `422` |
 | `webhook.max_attempts` | integer 1–50 | `422` |
@@ -305,8 +309,8 @@ Optional body:
 ```
 
 - No body → saved webhook target and secret.
-- `url` present → used for this test only, must be valid (`400` otherwise); it
-  is allowed while `enabled` is false.
+- `url` present → used for this test only, must be valid and credential-free
+  (`400` otherwise); it is allowed while `enabled` is false.
 - `secret` present → used for this test only; `""` means unsigned.
 - Uses the saved `timeout`.
 
@@ -559,7 +563,7 @@ Required cases:
     the old key stops working; v1 file migrates, authenticates, and is
     persisted as v2.
 11. UI merge: after an API write, a simulated UI save built from a stale
-    `config_template` preserves the API-changed webhook URL and the incrementing
+    `config_template` preserves the API-changed Webhook target and the incrementing
     revision.
 12. Live retry config: dispatcher picks up `max_attempts`/`backoff`/`capacity`
     from `config.json` when constructor args are absent; constructor args still
@@ -601,7 +605,7 @@ Core total ≈ 600–900 source lines, 3–4 focused days.
    writable setting, test the webhook, restart the server, and manage keys.
 2. `GET /api/settings` never reveals the secret; `GET /api/keys` never reveals
    hashes; raw keys appear only in the creation response.
-3. Webhook URL/secret/enable and retry changes take effect on the next inbound
+3. Webhook target/secret/enable and retry changes take effect on the next inbound
    SMS without a restart.
 4. A port change followed by `POST /api/server/restart` leaves the API listening
    on the new port; `request.json` ends at `"start"`; no restart loop; a bind

@@ -617,12 +617,7 @@ def _last_delivery(config_dir: str) -> dict | None:
 def _webhook_status(settings: dict, config_dir: str, warnings: list) -> dict:
     webhook = settingsSvc.writable_settings(settings)["webhook"]
     url = webhook["url"]
-    url_host = None
-    if url:
-        try:
-            url_host = urlparse(url).hostname
-        except ValueError:
-            url_host = None
+    url_host = webhookSvc.target_host(url)
 
     pending = _status_runtime("outbox_pending")
     capacity = webhook["capacity"]
@@ -661,13 +656,19 @@ def _webhook_status(settings: dict, config_dir: str, warnings: list) -> dict:
             ),
         })
 
+    last_delivery = _last_delivery(config_dir)
+    if last_delivery and isinstance(last_delivery.get("error"), str):
+        last_delivery["error"] = _scrub_webhook_target(
+            url, last_delivery["error"]
+        )
+
     return {
         "enabled": bool(webhook["enabled"]),
         "url_host": url_host,
         "secret_set": bool(webhook["secret_set"]),
         "outbox_pending": pending,
         "outbox_capacity": capacity,
-        "last_delivery": _last_delivery(config_dir),
+        "last_delivery": last_delivery,
     }
 
 
@@ -711,9 +712,13 @@ async def api_get_settings(
     return _settings_body(settings)
 
 def _settings_body(settings: dict) -> dict:
+    writable = settingsSvc.writable_settings(settings)
+    writable["webhook"]["url"] = webhookSvc.redact_target_credentials(
+        writable["webhook"]["url"]
+    )
     return {
         "revision": settingsSvc.get_revision(settings),
-        "settings": settingsSvc.writable_settings(settings),
+        "settings": writable,
     }
 
 def _settings_log_message(payload: dict) -> str:
@@ -923,7 +928,8 @@ def _scrub_webhook_target(url: str, error: str) -> str:
     """Remove URL parts from an error so credentials never reach the caller."""
     if not error:
         return error
-    candidates = {url, url.strip()}
+    error = webhookSvc.scrub_webhook_error(error)
+    candidates: set[str | None] = {url, url.strip()}
     try:
         parsed = urlparse(url)
     except ValueError:

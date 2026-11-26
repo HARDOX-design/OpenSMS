@@ -236,6 +236,18 @@ class WebhookSvcTests(unittest.TestCase):
         self.assertIsNone(status)
         self.assertTrue(error)
 
+    def test_credentialed_target_is_not_posted_by_test_delivery(self):
+        url = self.target.url.replace("http://", "http://user:password@")
+
+        ok, status, error = webhookSvc.send_test_webhook(
+            {"url": url, "secret": ""}
+        )
+
+        self.assertFalse(ok)
+        self.assertIsNone(status)
+        self.assertIn("credentials", error)
+        self.assertEqual(self.target.count, 0)
+
     ## Delivery
 
     def test_delivers_signed_payload(self):
@@ -338,6 +350,31 @@ class WebhookSvcTests(unittest.TestCase):
             status = json.load(sf)
         self.assertFalse(status["ok"])
         self.assertEqual(status["attempts"], 3)
+
+    def test_legacy_credentialed_outbox_target_is_not_posted(self):
+        payload = webhookSvc.build_inbound_payload({
+            "from": "+14155552671", "text": "legacy",
+        })
+        credentialed_url = self.target.url.replace(
+            "http://", "http://legacy-user:legacy-password@"
+        )
+        with open(self.outbox_path, "w", encoding="utf-8") as of:
+            json.dump([{
+                "delivery_id": payload["delivery_id"],
+                "event": payload["event"],
+                "url": credentialed_url,
+                "payload": payload,
+                "attempts": 0,
+            }], of)
+
+        dispatcher = self.make_dispatcher(max_attempts=1)
+
+        self.assertTrue(wait_for(lambda: dispatcher.pending_count() == 0))
+        status = self.wait_for_status()
+        self.assertFalse(status["ok"])
+        self.assertEqual(status["attempts"], 0)
+        self.assertIn("credentials", status["error"])
+        self.assertEqual(self.target.count, 0)
 
     def test_outbox_is_delivered_after_restart(self):
         payload = webhookSvc.build_inbound_payload({
@@ -583,6 +620,26 @@ class WebhookSvcTests(unittest.TestCase):
             "error": "timed out", "at": "now",
         })
         self.assertIn("failed after 3 attempt(s)", failed)
+        credentialed = webhookSvc.format_webhook_status({
+            "ok": False,
+            "attempts": 1,
+            "error": (
+                "Could not deliver to "
+                "http://status-user:status-password@old.example.lan/hook"
+            ),
+            "at": "now",
+        })
+        self.assertNotIn("status-user", credentialed)
+        self.assertNotIn("status-password", credentialed)
+        self.assertNotIn("http://", credentialed)
+        ordinary_url = "http://ordinary.example.lan/hook"
+        ordinary = webhookSvc.format_webhook_status({
+            "ok": False,
+            "attempts": 1,
+            "error": f"Could not deliver to {ordinary_url}",
+            "at": "now",
+        })
+        self.assertIn(ordinary_url, ordinary)
 
 
 if __name__ == "__main__":

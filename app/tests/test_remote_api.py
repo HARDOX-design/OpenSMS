@@ -267,16 +267,22 @@ class StatusTests(ApiTestCase):
         self.assertIsNone(body["webhook"]["last_delivery"])
 
     def test_status_reports_only_the_webhook_host_and_secret_presence(self):
+        credentialed_url = (
+            "http://proxy-user:proxy-pass@proxy.example.lan:8080/"
+            "hooks/SENSITIVE-PATH?token=SENSITIVE-TOKEN"
+        )
         self.write_config(self.config(
             webhook={
                 "enabled": True,
-                "url": (
-                    "http://proxy-user:proxy-pass@proxy.example.lan:8080/"
-                    "hooks/SENSITIVE-PATH?token=SENSITIVE-TOKEN"
-                ),
+                "url": credentialed_url,
                 "secret": "SENSITIVE-SECRET",
             },
         ))
+        self.write_json("webhook_status.json", {
+            "ok": False,
+            "error": f"Could not deliver to {credentialed_url}",
+            "at": "2026-11-26T12:34:56+00:00",
+        })
         raw_key = self.add_api_key()
 
         response = self.status(raw_key)
@@ -285,6 +291,7 @@ class StatusTests(ApiTestCase):
         body = response.json()
         self.assertEqual(body["webhook"]["url_host"], "proxy.example.lan")
         self.assertTrue(body["webhook"]["secret_set"])
+        self.assertIn("webhook_url_invalid", self.warning_codes(body))
         for sensitive in (
             "SENSITIVE-PATH",
             "SENSITIVE-TOKEN",
@@ -296,6 +303,27 @@ class StatusTests(ApiTestCase):
         ):
             with self.subTest(sensitive=sensitive):
                 self.assertNotIn(sensitive, response.text)
+
+    def test_status_scrubs_credentials_from_a_previous_target_error(self):
+        self.write_config(self.config(webhook={
+            "enabled": True,
+            "url": "https://current.example.lan/hook",
+        }))
+        self.write_json("webhook_status.json", {
+            "ok": False,
+            "error": (
+                "Could not deliver to "
+                "http://old-user:old-password@old.example.lan/hook"
+            ),
+        })
+        raw_key = self.add_api_key()
+
+        response = self.status(raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("old-user", response.text)
+        self.assertNotIn("old-password", response.text)
+        self.assertNotIn("http://", response.text)
 
     def test_forwarding_disabled_warns_that_new_inbound_sms_are_discarded(self):
         raw_key = self.add_api_key()
@@ -408,6 +436,41 @@ class SettingsReadTests(ApiTestCase):
         self.assertTrue(settings["webhook"]["secret_set"])
         self.assertNotIn("secret", settings["webhook"])
         self.assertNotIn("unknown_webhook", settings["webhook"])
+
+    def test_settings_redacts_userinfo_from_a_legacy_target(self):
+        credentialed_url = (
+            "http://proxy-user:proxy-pass@proxy.example.lan:8080/"
+            "hooks/opensms?token=SENSITIVE-TOKEN"
+        )
+        config = {
+            "port": 9292,
+            "boot": False,
+            "revision": 4,
+            "webhook": {
+                "enabled": True,
+                "url": credentialed_url,
+                "secret": "topsecret",
+            },
+        }
+        self.write_config(config)
+        raw_key = self.add_api_key()
+
+        response = self.client.get(
+            "/api/settings", headers=self.auth(raw_key)
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["settings"]["webhook"]["url"],
+            (
+                "http://proxy.example.lan:8080/hooks/opensms"
+                "?token=SENSITIVE-TOKEN"
+            ),
+        )
+        for sensitive in ("proxy-user", "proxy-pass", "topsecret"):
+            with self.subTest(sensitive=sensitive):
+                self.assertNotIn(sensitive, response.text)
+        self.assertEqual(self.read_config(), config)
 
     def test_settings_fill_defaults_for_a_legacy_config(self):
         self.write_config({
@@ -623,6 +686,32 @@ class SettingsWriteTests(SettingsWriteTestCase):
         self.assertEqual(on_disk["webhook"]["secret"], "old-secret")
         self.assertEqual(self.tmp_files(), [])
 
+    def test_put_replacing_a_legacy_credentialed_target_never_echoes_it(self):
+        config = self.stored_config()
+        config["webhook"]["enabled"] = True
+        config["webhook"]["url"] = (
+            "http://legacy-user:legacy-password@proxy.example.lan/hooks/old"
+        )
+        self.write_config(config)
+        raw_key = self.add_api_key()
+
+        response = self.put(self.valid_payload(webhook={
+            "enabled": True,
+            "url": "https://proxy.example.lan/hooks/new",
+        }), raw_key)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json()["settings"]["webhook"]["url"],
+            "https://proxy.example.lan/hooks/new",
+        )
+        self.assertNotIn("legacy-user", response.text)
+        self.assertNotIn("legacy-password", response.text)
+        self.assertEqual(
+            self.read_config()["webhook"]["url"],
+            "https://proxy.example.lan/hooks/new",
+        )
+
     def test_omitting_the_secret_keeps_the_stored_secret(self):
         self.write_config(self.stored_config())
         raw_key = self.add_api_key()
@@ -762,6 +851,32 @@ class SettingsValidationTests(SettingsWriteTestCase):
                 self.assertIsInstance(response.json()["detail"], str)
                 self.assertEqual(self.read_config(), before)
                 self.assertEqual(self.tmp_files(), [])
+
+    def test_put_rejects_a_credentialed_target_even_when_disabled(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+        before = self.read_config()
+
+        targets = {
+            "valid authority": (
+                "http://proxy-user:proxy-pass@proxy.example.lan/hooks/opensms"
+            ),
+            "malformed authority": "http://proxy-user:proxy-pass@[invalid",
+        }
+        for name, url in targets.items():
+            for enabled in (True, False):
+                with self.subTest(name=name, enabled=enabled):
+                    response = self.put(self.valid_payload(webhook={
+                        "enabled": enabled,
+                        "url": url,
+                    }), raw_key)
+
+                    self.assertEqual(response.status_code, 400, response.text)
+                    self.assertIsInstance(response.json()["detail"], str)
+                    self.assertNotIn("proxy-user", response.text)
+                    self.assertNotIn("proxy-pass", response.text)
+                    self.assertEqual(self.read_config(), before)
+                    self.assertEqual(self.tmp_files(), [])
 
     def test_put_rejects_a_non_object_body(self):
         raw_key = self.add_api_key()
@@ -1095,29 +1210,34 @@ class WebhookTestTests(ApiTestCase):
             self.read_config()["webhook"]["secret"], "saved-secret"
         )
 
-    def test_an_error_never_echoes_the_target_with_credentials(self):
+    def test_credentialed_targets_are_rejected_without_posting(self):
         raw_key = self.add_api_key()
+        port = self.target.server.server_address[1]
+        targets = {
+            "password": f"http://proxy-user:proxy-pass@127.0.0.1:{port}/hook",
+            "username only": f"http://proxy-user@127.0.0.1:{port}/hook",
+            "empty password": f"http://proxy-user:@127.0.0.1:{port}/hook",
+            "empty userinfo": f"http://:@127.0.0.1:{port}/hook",
+            "https": "https://proxy-user:proxy-pass@proxy.example.lan/hook",
+        }
 
-        response = self.post_test(raw_key, {
-            "url": (
-                "http://proxy-user:proxy-pass@127.0.0.1:1/"
-                "pa th?token=SENSITIVE-TOKEN"
-            ),
-        })
+        for name, url in targets.items():
+            with self.subTest(name):
+                response = self.post_test(raw_key, {"url": url})
 
-        self.assertEqual(response.status_code, 502)
-        body = response.json()
-        self.assertFalse(body["ok"])
-        self.assertIsNone(body["http_status"])
-        self.assertTrue(body["error"])
-        for sensitive in (
-            "proxy-user",
-            "proxy-pass",
-            "SENSITIVE-TOKEN",
-            "/pa th",
-        ):
-            with self.subTest(sensitive=sensitive):
-                self.assertNotIn(sensitive, response.text)
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertIsInstance(response.json()["detail"], str)
+                for sensitive in ("proxy-user", "proxy-pass", ":@", "@127"):
+                    with self.subTest(sensitive=sensitive):
+                        self.assertNotIn(sensitive, response.text)
+
+        legacy_url = targets["password"]
+        self.save_webhook(url=legacy_url)
+        response = self.post_test(raw_key)
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertNotIn("proxy-user", response.text)
+        self.assertNotIn("proxy-pass", response.text)
+        self.assertEqual(self.target.count, 0)
 
     def test_a_test_needs_a_valid_target(self):
         raw_key = self.add_api_key()

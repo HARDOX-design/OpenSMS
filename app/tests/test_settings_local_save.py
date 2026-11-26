@@ -244,6 +244,33 @@ class LocalSaveValidationTests(LocalSaveTestCase):
                     settingsSvc.SettingsRuleError,
                 )
 
+    def test_a_credentialed_target_rejects_the_whole_local_save(self):
+        credentialed_url = (
+            "http://local-user:local-password@remote.example.lan/hooks/opensms"
+        )
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                config = self.stored_config()
+                config["webhook"]["enabled"] = enabled
+                self.write_config(config)
+
+                self.assert_rejected(
+                    {"webhook": {"url": credentialed_url}},
+                    settingsSvc.SettingsRuleError,
+                )
+
+    def test_an_unrelated_save_cannot_preserve_a_legacy_credentialed_target(self):
+        config = self.stored_config()
+        config["webhook"]["url"] = (
+            "http://legacy-user:legacy-password@remote.example.lan/"
+            "hooks/opensms"
+        )
+        self.write_config(config)
+
+        self.assert_rejected(
+            {"port": 9393}, settingsSvc.SettingsRuleError
+        )
+
     def test_both_port_bounds_are_accepted(self):
         for port in (settingsSvc.PORT_MIN, settingsSvc.PORT_MAX):
             with self.subTest(port=port):

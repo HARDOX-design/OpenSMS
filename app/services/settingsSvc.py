@@ -25,6 +25,7 @@ from services.webhookSvc import (
     MAX_ATTEMPTS_MIN,
     TIMEOUT_MAX,
     TIMEOUT_MIN,
+    has_target_credentials,
     is_valid_target,
     normalize_webhook_config,
 )
@@ -272,6 +273,8 @@ def _validate_backoff(value) -> list:
 def validate_business_rules(writable: dict):
     """Business rules that are not schema errors (HTTP 400)."""
     webhook = writable["webhook"]
+    if has_target_credentials(webhook["url"]):
+        raise SettingsRuleError("webhook.url must not contain credentials")
     if webhook["enabled"] and not is_valid_target(webhook["url"]):
         raise SettingsRuleError(
             "webhook.url must be a valid http(s) URL when webhook.enabled is true"
