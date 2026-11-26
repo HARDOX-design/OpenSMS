@@ -39,6 +39,7 @@ from services.webhookSvc import (
 # global vars
 resp_template = {
     "server": "none",
+    "port": None,
     "serial": "none",
     "provider": "none",
 }
@@ -187,6 +188,7 @@ def api_server_control(api_stat: str, port: int | None = None):
     if api_stat == "stop":
         if stop_api_server():
             resp_template["server"] = "stopped"
+            resp_template["port"] = None
     elif api_stat == "start":
         # Settings own the port; the control file is only a fallback.
         start_port = (
@@ -195,6 +197,7 @@ def api_server_control(api_stat: str, port: int | None = None):
         app_api_server.start(start_port)
         api_started = True
         resp_template["server"] = "started"
+        resp_template["port"] = start_port
     Thread(target=write_resp, daemon=True).start()
 
 def restart_api_server():

@@ -195,12 +195,19 @@ def target_host(url: str) -> str | None:
 
 def is_valid_target(url: str) -> bool:
     parsed = _parse_target(url)
-    return (
-        parsed is not None
-        and parsed.scheme in VALID_TARGET_SCHEMES
-        and bool(parsed.netloc)
-        and not _parsed_has_credentials(parsed)
-    )
+    if (
+        parsed is None
+        or parsed.scheme not in VALID_TARGET_SCHEMES
+        or _parsed_has_credentials(parsed)
+    ):
+        return False
+    try:
+        if not parsed.hostname:
+            return False
+        parsed.port  # raises ValueError for a non-numeric or out-of-range port
+    except ValueError:
+        return False
+    return True
 
 ## Payload
 

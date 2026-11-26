@@ -339,8 +339,9 @@ Optional body:
 
 Rules:
 
-- `409` if the API is not running (provider) or a restart was requested within
-  the last 5 seconds.
+- `409` if the API is not running (provider), the platform has no Restart
+  consumer (the CLI runs the server without the service loop), or a restart was
+  requested within the last 5 seconds.
 - The handler reads the effective port from `config.json`, schedules the
   control-file write **after** the response (`RESTART_DELAY = 0.4 s`), and
   returns.
@@ -356,7 +357,8 @@ Service side (`appSvc`):
 
 1. Handle `"restart"`: `stop()`, sleep 0.5 s, start with
    `load_settings(config.json)["port"]`, falling back to `request.json["port"]`.
-2. Write `resp.json` with `"started"`.
+2. Write `resp.json` with `"started"` and the effective port so the UI can
+   refresh when a Restart changes the bound port.
 3. Rewrite `request.json` with `"server": "start"` and the effective port,
    preserving other keys.
 4. The 0.2 s loop then sees `"start"` with the server already started and does

@@ -194,6 +194,9 @@ curl -sS -X POST 'http://192.168.1.50:9292/api/server/restart' \
   -H "Authorization: Bearer $OSMS_KEY"
 ```
 
+Restart requires the background service loop; the standalone CLI runs the
+server directly and refuses Restart with `409`.
+
 `GET /api/status` reports the bound and configured port, network addresses, Outbox depth, the last Delivery attempt, and warnings (for example when forwarding is disabled or the Outbox is near capacity). `POST /api/webhook/test` tests a Webhook target without saving it. The full contract, error codes, and persisted schema are in [docs/remote-api.md](./docs/remote-api.md).
 
 ## 📥 Receiving SMS (Android)

@@ -794,6 +794,8 @@ def _settings_log_message(payload: dict) -> str:
 def _restart_required(settings: dict) -> bool:
     """True only when the saved port differs from a known live bound port."""
     bound_port = get_runtime_provider("bound_port")
+    if bound_port is None:
+        bound_port = _live_attr("bound_port")
     port = settings.get("port")
     if bound_port is None or port is None:
         return False
@@ -973,10 +975,7 @@ def _resolve_webhook_test_config(settings: dict, overrides: dict) -> tuple:
     if not isinstance(secret, str):
         secret = ""
     secret = overrides.get("secret", secret)
-    try:
-        timeout = float(webhook.get("timeout", webhookSvc.DEFAULT_TIMEOUT))
-    except (TypeError, ValueError):
-        timeout = webhookSvc.DEFAULT_TIMEOUT
+    timeout = webhookSvc.normalize_webhook_config(webhook)["timeout"]
     return url, secret, timeout
 
 
@@ -1052,6 +1051,12 @@ async def api_server_restart(
         raise HTTPException(
             status_code=409,
             detail="The API server is not running",
+        )
+
+    if not _status_runtime("restart_consumer", True):
+        raise HTTPException(
+            status_code=409,
+            detail="Restart is not available on this platform",
         )
 
     now = time.monotonic()

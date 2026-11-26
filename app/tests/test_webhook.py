@@ -181,6 +181,13 @@ class WebhookSvcTests(unittest.TestCase):
         self.assertFalse(webhookSvc.is_valid_target("ftp://example.com"))
         self.assertFalse(webhookSvc.is_valid_target("http://["))
         self.assertFalse(webhookSvc.is_valid_target(None))
+        self.assertFalse(webhookSvc.is_valid_target("http://:9292/hooks"))
+        self.assertFalse(
+            webhookSvc.is_valid_target("http://proxy.example.lan:not-a-port/hooks")
+        )
+        self.assertFalse(
+            webhookSvc.is_valid_target("http://proxy.example.lan:99999/hooks")
+        )
 
     def test_payload_shape(self):
         payload = webhookSvc.build_inbound_payload({

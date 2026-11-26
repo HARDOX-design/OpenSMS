@@ -117,6 +117,7 @@ class OpenSmsApp(MDApp):
         self.wake_lock = None
         self.service_stat = False
         self.api_started = False
+        self.api_port = None
         self.key_exists = False
         self.api_key = None
         self.serial_started = False
@@ -316,17 +317,43 @@ class OpenSmsApp(MDApp):
                         # server status
                         server_stat = resp.get("server", "unknown")
                         if server_stat == "started":
-                            if not self.api_started:
+                            reported_port = resp.get("port")
+                            if not isinstance(reported_port, int):
+                                reported_port = None
+                            port_changed = (
+                                reported_port is not None
+                                and (
+                                    reported_port != self.api_port
+                                    or reported_port
+                                    != self.req_template.get("port")
+                                )
+                            )
+                            if not self.api_started or port_changed:
                                 self.api_started = True
-                                api_srv_lbl.text = f"API Server running on port: {self.req_template["port"]}"
+                                if reported_port is not None:
+                                    self.api_port = reported_port
+                                display_port = (
+                                    self.api_port
+                                    or self.req_template["port"]
+                                )
+                                api_srv_lbl.text = (
+                                    f"API Server running on port: {display_port}"
+                                )
                                 api_srv_btn.btn_icon = "stop"
                                 api_srv_btn.btn_txt = "Stop Server"
                                 api_srv_btn.md_bg_color = "orange"
-                                Clock.schedule_once(lambda dt: self.update_api_details())
+                                if port_changed:
+                                    Clock.schedule_once(
+                                        lambda dt: self.reload_settings_config()
+                                    )
+                                Clock.schedule_once(
+                                    lambda dt: self.update_api_details()
+                                )
                                 #Clock.schedule_once(lambda dt: self.show_toast_msg("API Server Started"))
                         elif server_stat == "stopped":
                             if self.api_started:
                                 self.api_started = False
+                                self.api_port = None
                                 api_srv_lbl.text = "API Server is not running"
                                 api_srv_btn.btn_icon = "play"
                                 api_srv_btn.btn_txt = "Start Server"
@@ -704,12 +731,14 @@ class OpenSmsApp(MDApp):
             webhook["secret"] = secret
         return webhook
 
-    def persist_settings_form(self, form):
+    def persist_settings_form(self, form, *, refresh_webhook_only=False):
         """Merge the form over fresh Settings and persist it atomically."""
         saved = self.persist_local_settings(form)
         if saved is None:
             return False
-        self.apply_persisted_settings(saved)
+        self.apply_persisted_settings(
+            saved, refresh_webhook_only=refresh_webhook_only
+        )
         return True
 
     def persist_local_settings(self, form):
@@ -717,18 +746,25 @@ class OpenSmsApp(MDApp):
         try:
             return settingsSvc.save_local_settings(self.app_config, form)
         except settingsSvc.SettingsValidationError as exc:
+            message = str(exc)
             Clock.schedule_once(
-                lambda dt: self.show_toast_msg(str(exc), is_error=True)
+                lambda dt: self.show_toast_msg(message, is_error=True)
             )
             return None
 
-    def apply_persisted_settings(self, settings: dict):
+    def apply_persisted_settings(
+        self, settings: dict, *, refresh_webhook_only: bool = False
+    ):
         """Adopt freshly persisted Settings and show them."""
         self.config_template = dict(settings)
         self.req_template["port"] = int(
             self.config_template.get("port") or settingsSvc.DEFAULT_PORT
         )
-        self.refresh_settings_view()
+        if refresh_webhook_only:
+            # A Webhook-only save must not overwrite an unsaved port edit.
+            self.refresh_webhook_view()
+        else:
+            self.refresh_settings_view()
 
     def webhook_switch_active(self, instance, value):
         """Apply the toggle immediately, instead of waiting for Save.
@@ -744,7 +780,9 @@ class OpenSmsApp(MDApp):
             instance.active = False
             self.webhook_switch_guard = False
             return
-        if not self.persist_settings_form({"webhook": webhook}):
+        if not self.persist_settings_form(
+            {"webhook": webhook}, refresh_webhook_only=True
+        ):
             self.refresh_webhook_view()
             return
         self.show_toast_msg(

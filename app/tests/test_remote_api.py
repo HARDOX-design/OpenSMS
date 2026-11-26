@@ -1417,6 +1417,15 @@ class SettingsRestartRequiredTests(SettingsWriteTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["restart_required"])
 
+    def test_restart_uses_the_live_server_port_without_a_provider(self):
+        postApi.app.state.server.bound_port = 9292
+        raw_key = self.add_api_key()
+
+        response = self.put(self.valid_payload(port=9393), raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["restart_required"])
+
 
 class SettingsWriteAuthTests(SettingsWriteTestCase):
 
@@ -1687,6 +1696,29 @@ class WebhookTestTests(ApiTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(calls[0][1], 7)
 
+    def test_an_invalid_saved_timeout_uses_the_normalized_default(self):
+        raw_key = self.add_api_key()
+        for timeout in (0, 61):
+            with self.subTest(timeout=timeout):
+                self.save_webhook(timeout=timeout)
+                calls = []
+
+                def record(config, timeout):
+                    calls.append((config, timeout))
+                    return True, 204, None
+
+                with mock.patch.object(
+                    postApi.webhookSvc,
+                    "send_test_webhook",
+                    side_effect=record,
+                ):
+                    response = self.post_test(
+                        raw_key, {"url": self.target.url}
+                    )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(calls[0][1], 10)
+
     def test_body_shape_errors_keep_their_messages(self):
         raw_key = self.add_api_key()
 
@@ -1894,6 +1926,20 @@ class RestartTests(RestartTestCase):
 
     def test_a_restart_is_refused_while_the_server_is_not_running(self):
         postApi.set_runtime_providers({"running": lambda: False})
+        raw_key = self.add_api_key()
+
+        response = self.restart(raw_key)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIsInstance(response.json()["detail"], str)
+        self.assertFalse(os.path.exists(self.request_path()))
+        self.assertEqual(FakeTimer.instances, [])
+
+    def test_a_restart_is_refused_without_a_restart_consumer(self):
+        postApi.set_runtime_providers({
+            "running": lambda: True,
+            "restart_consumer": lambda: False,
+        })
         raw_key = self.add_api_key()
 
         response = self.restart(raw_key)

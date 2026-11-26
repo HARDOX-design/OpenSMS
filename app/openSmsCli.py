@@ -12,7 +12,12 @@ import subprocess
 
 # local imports
 from services.pathMgr import get_os_platform
-from services.postApi import PosiApiServer, set_api_logger, set_serial_port
+from services.postApi import (
+    PosiApiServer,
+    set_api_logger,
+    set_runtime_providers,
+    set_serial_port,
+)
 from services.logSvc import LogService
 from services.config import app_name
 
@@ -69,6 +74,9 @@ def start_background(serial, baud, host, port):
 class OpenSmsCliCls:
 
     def __init__(self):
+        # The CLI runs PosiApiServer directly; there is no service loop to
+        # consume a Restart intent, so /api/server/restart must refuse it.
+        set_runtime_providers({"restart_consumer": lambda: False})
         self.serial_ok = False
         self.api_server = None
 
