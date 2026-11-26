@@ -1,4 +1,6 @@
+import glob
 import os
+import threading
 import time
 
 from api_test_case import ApiTestCase
@@ -227,3 +229,433 @@ class ScopeTests(ApiTestCase):
         )
 
         self.assertEqual(response.status_code, 403)
+
+
+class RecordingLogger:
+
+    def __init__(self):
+        self.messages = []
+        self.written = threading.Event()
+        self._lock = threading.Lock()
+
+    def write_log(self, message: str):
+        with self._lock:
+            self.messages.append(message)
+        self.written.set()
+
+    def text(self) -> str:
+        with self._lock:
+            return "\n".join(self.messages)
+
+
+class SettingsWriteTestCase(ApiTestCase):
+
+    def valid_payload(self, **overrides) -> dict:
+        payload = {
+            "port": 9292,
+            "boot": False,
+            "webhook": {
+                "enabled": False,
+                "url": "",
+                "timeout": 10,
+                "max_attempts": 3,
+                "backoff": [5, 30],
+                "capacity": 100,
+            },
+        }
+        webhook_overrides = overrides.pop("webhook", None)
+        if webhook_overrides:
+            payload["webhook"].update(webhook_overrides)
+        payload.update(overrides)
+        return payload
+
+    def stored_config(self) -> dict:
+        return {
+            "app": "opensms",
+            "port": 9292,
+            "boot": False,
+            "permissions": True,
+            "revision": 3,
+            "unknown_top_level": "internal",
+            "webhook": {
+                "enabled": False,
+                "url": "",
+                "secret": "old-secret",
+                "timeout": 10,
+                "max_attempts": 3,
+                "backoff": [5, 30],
+                "capacity": 100,
+                "unknown_webhook": "internal",
+            },
+        }
+
+    def put(self, payload: dict, raw_key: str):
+        return self.client.put(
+            "/api/settings", json=payload, headers=self.auth(raw_key)
+        )
+
+    def tmp_files(self) -> list:
+        return glob.glob(os.path.join(self.config_dir, "*.tmp"))
+
+
+class SettingsWriteTests(SettingsWriteTestCase):
+
+    def test_put_replaces_the_writable_subset_and_bumps_the_revision(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+
+        response = self.put(self.valid_payload(
+            port=9393,
+            boot=True,
+            webhook={
+                "enabled": True,
+                "url": "https://proxy.example.lan/hooks/opensms",
+                "timeout": 7,
+                "max_attempts": 4,
+                "backoff": [1, 2, 3],
+                "capacity": 250,
+            },
+        ), raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["revision"], 4)
+        self.assertEqual(body["settings"]["port"], 9393)
+        self.assertTrue(body["settings"]["boot"])
+        self.assertEqual(body["settings"]["webhook"], {
+            "enabled": True,
+            "url": "https://proxy.example.lan/hooks/opensms",
+            "secret_set": True,
+            "timeout": 7,
+            "max_attempts": 4,
+            "backoff": [1, 2, 3],
+            "capacity": 250,
+        })
+        self.assertNotIn("old-secret", response.text)
+
+        on_disk = self.read_config()
+        self.assertEqual(on_disk["revision"], 4)
+        self.assertEqual(on_disk["port"], 9393)
+        self.assertTrue(on_disk["boot"])
+        self.assertEqual(on_disk["app"], "opensms")
+        self.assertTrue(on_disk["permissions"])
+        self.assertEqual(on_disk["unknown_top_level"], "internal")
+        self.assertEqual(on_disk["webhook"]["unknown_webhook"], "internal")
+        self.assertEqual(on_disk["webhook"]["secret"], "old-secret")
+        self.assertEqual(self.tmp_files(), [])
+
+    def test_omitting_the_secret_keeps_the_stored_secret(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+
+        response = self.put(self.valid_payload(), raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["settings"]["webhook"]["secret_set"])
+        self.assertEqual(self.read_config()["webhook"]["secret"], "old-secret")
+
+    def test_an_empty_secret_clears_the_stored_secret(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+
+        response = self.put(
+            self.valid_payload(webhook={"secret": ""}), raw_key
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["settings"]["webhook"]["secret_set"])
+        self.assertEqual(self.read_config()["webhook"]["secret"], "")
+
+    def test_a_non_empty_secret_replaces_the_stored_secret(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+
+        response = self.put(
+            self.valid_payload(webhook={"secret": "new-shared-secret"}), raw_key
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["settings"]["webhook"]["secret_set"])
+        self.assertEqual(
+            self.read_config()["webhook"]["secret"], "new-shared-secret"
+        )
+        self.assertNotIn("new-shared-secret", response.text)
+
+    def test_put_rejects_a_secret_longer_than_256_characters(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+
+        response = self.put(
+            self.valid_payload(webhook={"secret": "x" * 257}), raw_key
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIsInstance(response.json()["detail"], str)
+        self.assertEqual(self.read_config()["webhook"]["secret"], "old-secret")
+
+
+class SettingsValidationTests(SettingsWriteTestCase):
+
+    def test_put_rejects_invalid_values_and_leaves_settings_unchanged(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+        before = self.read_config()
+
+        cases = {
+            "port below range": {"port": 1024},
+            "port above range": {"port": 65536},
+            "port not an integer": {"port": "9292"},
+            "port is a boolean": {"port": True},
+            "boot is not a boolean": {"boot": "yes"},
+            "enabled is not a boolean": {"webhook": {"enabled": "yes"}},
+            "url is not a string": {"webhook": {"url": 42}},
+            "timeout below range": {"webhook": {"timeout": 0}},
+            "timeout above range": {"webhook": {"timeout": 61}},
+            "max attempts below range": {"webhook": {"max_attempts": 0}},
+            "max attempts above range": {"webhook": {"max_attempts": 51}},
+            "backoff empty": {"webhook": {"backoff": []}},
+            "backoff has a zero": {"webhook": {"backoff": [0]}},
+            "backoff has a negative value": {"webhook": {"backoff": [-1]}},
+            "backoff above range": {"webhook": {"backoff": [3601]}},
+            "backoff too long": {"webhook": {"backoff": [1] * 9}},
+            "backoff is not a list": {"webhook": {"backoff": "5"}},
+            "capacity below range": {"webhook": {"capacity": 9}},
+            "capacity above range": {"webhook": {"capacity": 5001}},
+            "unknown top-level field": {"unknown_top_level": 1},
+            "unknown webhook field": {"webhook": {"unknown_webhook": 1}},
+        }
+
+        for name, overrides in cases.items():
+            with self.subTest(name):
+                response = self.put(self.valid_payload(**overrides), raw_key)
+
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIsInstance(response.json()["detail"], str)
+                self.assertTrue(response.json()["detail"])
+                self.assertEqual(self.read_config(), before)
+                self.assertEqual(self.tmp_files(), [])
+
+    def test_put_rejects_missing_required_fields(self):
+        raw_key = self.add_api_key()
+        cases = {
+            "port": "port",
+            "boot": "boot",
+            "webhook": "webhook",
+            "webhook.enabled": ("webhook", "enabled"),
+            "webhook.url": ("webhook", "url"),
+            "webhook.timeout": ("webhook", "timeout"),
+            "webhook.max_attempts": ("webhook", "max_attempts"),
+            "webhook.backoff": ("webhook", "backoff"),
+            "webhook.capacity": ("webhook", "capacity"),
+        }
+
+        for name, path in cases.items():
+            with self.subTest(name):
+                payload = self.valid_payload()
+                if isinstance(path, tuple):
+                    del payload[path[0]][path[1]]
+                else:
+                    del payload[path]
+
+                response = self.put(payload, raw_key)
+
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIn(name.split(".")[-1], response.json()["detail"])
+
+    def test_put_rejects_enabling_forwarding_without_a_valid_target(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+        before = self.read_config()
+
+        for name, url in {
+            "empty target": "",
+            "not a url": "not-a-url",
+            "not http": "ftp://proxy.example.lan/hooks",
+            "no host": "http:///hooks",
+        }.items():
+            with self.subTest(name):
+                response = self.put(
+                    self.valid_payload(webhook={"enabled": True, "url": url}),
+                    raw_key,
+                )
+
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertIsInstance(response.json()["detail"], str)
+                self.assertEqual(self.read_config(), before)
+                self.assertEqual(self.tmp_files(), [])
+
+    def test_put_rejects_a_non_object_body(self):
+        raw_key = self.add_api_key()
+
+        response = self.client.put(
+            "/api/settings", json=["not", "an", "object"],
+            headers=self.auth(raw_key),
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIsInstance(response.json()["detail"], str)
+
+    def test_put_rejects_malformed_json(self):
+        raw_key = self.add_api_key()
+
+        response = self.client.put(
+            "/api/settings",
+            content=b'{"port": ',
+            headers={**self.auth(raw_key), "Content-Type": "application/json"},
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIsInstance(response.json()["detail"], str)
+
+
+class SettingsRevisionTests(SettingsWriteTestCase):
+
+    def test_a_stale_revision_is_a_conflict(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+        before = self.read_config()
+
+        response = self.put(self.valid_payload(revision=2), raw_key)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIsInstance(response.json()["detail"], str)
+        self.assertEqual(self.read_config(), before)
+        self.assertEqual(self.tmp_files(), [])
+
+    def test_a_matching_revision_succeeds(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+
+        response = self.put(self.valid_payload(revision=3), raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["revision"], 4)
+
+    def test_an_absent_revision_is_last_writer_wins(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+
+        response = self.put(self.valid_payload(), raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["revision"], 4)
+
+    def test_a_non_integer_revision_is_rejected(self):
+        raw_key = self.add_api_key()
+
+        response = self.put(self.valid_payload(revision="3"), raw_key)
+
+        self.assertEqual(response.status_code, 422)
+
+    def test_schema_errors_are_reported_before_a_stale_revision(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+
+        response = self.put(
+            self.valid_payload(revision=1, port=80), raw_key
+        )
+
+        self.assertEqual(response.status_code, 422)
+
+    def test_a_stale_revision_is_reported_before_a_business_rule(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+
+        response = self.put(
+            self.valid_payload(
+                revision=1, webhook={"enabled": True, "url": ""}
+            ),
+            raw_key,
+        )
+
+        self.assertEqual(response.status_code, 409)
+
+
+class SettingsRestartRequiredTests(SettingsWriteTestCase):
+
+    def test_restart_is_not_required_when_the_saved_port_is_bound(self):
+        postApi.set_runtime_providers({"bound_port": lambda: 9292})
+        raw_key = self.add_api_key()
+
+        response = self.put(self.valid_payload(port=9292), raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["restart_required"])
+
+    def test_restart_is_required_when_the_saved_port_differs(self):
+        postApi.set_runtime_providers({"bound_port": lambda: 9292})
+        raw_key = self.add_api_key()
+
+        response = self.put(self.valid_payload(port=9393), raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["restart_required"])
+
+    def test_a_pending_port_change_keeps_reporting_restart_required(self):
+        config = self.stored_config()
+        config["port"] = 9393
+        self.write_config(config)
+        postApi.set_runtime_providers({"bound_port": lambda: 9292})
+        raw_key = self.add_api_key()
+
+        response = self.put(self.valid_payload(port=9393), raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["restart_required"])
+
+    def test_restart_is_not_required_when_the_bound_port_is_unknown(self):
+        raw_key = self.add_api_key()
+
+        response = self.put(self.valid_payload(port=9393), raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["restart_required"])
+
+
+class SettingsWriteAuthTests(SettingsWriteTestCase):
+
+    def test_put_refuses_a_missing_key(self):
+        response = self.client.put("/api/settings", json=self.valid_payload())
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_put_refuses_an_invalid_key(self):
+        self.add_api_key()
+
+        response = self.put(self.valid_payload(), "osms_not_a_real_key")
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_put_requires_the_settings_scope(self):
+        raw_key = self.add_api_key(scopes=("sms:write",))
+
+        response = self.put(self.valid_payload(), raw_key)
+
+        self.assertEqual(response.status_code, 403)
+
+
+class SettingsWriteLoggingTests(SettingsWriteTestCase):
+
+    def test_logs_name_fields_without_the_secret_or_the_body(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+        logger = RecordingLogger()
+        postApi.set_api_logger(logger)
+
+        response = self.put(self.valid_payload(
+            webhook={
+                "enabled": True,
+                "url": "https://proxy.example.lan/hooks/SENSITIVE-PATH",
+                "secret": "super-duper-secret",
+            },
+        ), raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(logger.written.wait(timeout=2))
+        logged = logger.text()
+        self.assertIn("Settings updated", logged)
+        self.assertIn("port", logged)
+        self.assertIn("webhook", logged)
+        self.assertNotIn("super-duper-secret", logged)
+        self.assertNotIn("SENSITIVE-PATH", logged)
+        self.assertNotIn("old-secret", logged)

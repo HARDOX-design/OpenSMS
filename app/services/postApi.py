@@ -249,6 +249,7 @@ class PosiApiServer:
     def __init__(self, host="0.0.0.0", port=9292):
         self.host = host
         self.port = port
+        self.bound_port: int | None = None
         self.kivyCallback = None
         self.server: uvicorn.Server | None = None
         self.thread: Thread | None = None
@@ -271,6 +272,8 @@ class PosiApiServer:
     # ----------------------------
     def _run(self, port=None):
         final_port = port if port else self.port
+        self.port = final_port
+        self.bound_port = final_port
         config = uvicorn.Config(
             app,
             host=self.host,
@@ -297,6 +300,7 @@ class PosiApiServer:
             if self.controlCallback:
                 self.controlCallback("error", str(e))
         finally:
+            self.bound_port = None
             self.server = None
 
     # ----------------------------
@@ -382,9 +386,56 @@ async def api_get_settings(
     client: dict = Depends(require_scope(SCOPE_SETTINGS))
 ):
     settings = settingsSvc.load_settings(_settings_path())
+    return _settings_body(settings)
+
+def _settings_body(settings: dict) -> dict:
     return {
         "revision": settingsSvc.get_revision(settings),
         "settings": settingsSvc.writable_settings(settings),
+    }
+
+def _settings_log_message(payload: dict) -> str:
+    """Field names only: values and request bodies must never reach the log."""
+    fields = ["port", "boot"]
+    webhook = payload.get("webhook")
+    if isinstance(webhook, dict):
+        fields.extend(f"webhook.{field}" for field in webhook)
+    return "Settings updated: " + ", ".join(fields)
+
+def _restart_required(settings: dict) -> bool:
+    """True only when the saved port differs from a known live bound port."""
+    bound_port = get_runtime_provider("bound_port")
+    if bound_port is None:
+        return False
+    try:
+        return int(settings.get("port")) != int(bound_port)
+    except (TypeError, ValueError):
+        return False
+
+@app.put("/api/settings")
+async def api_put_settings(
+    request: Request,
+    client: dict = Depends(require_scope(SCOPE_SETTINGS))
+):
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=422,
+            detail="Request body must be valid JSON",
+        )
+    try:
+        saved = settingsSvc.save_settings(_settings_path(), payload)
+    except settingsSvc.SettingsRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.detail)
+    except settingsSvc.SettingsRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except settingsSvc.SettingsValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    log_activities(_settings_log_message(payload))
+    return {
+        **_settings_body(saved),
+        "restart_required": _restart_required(saved),
     }
 
 @app.post("/sms/")

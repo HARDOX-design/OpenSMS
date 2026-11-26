@@ -50,6 +50,12 @@ class ApiTestCase(unittest.TestCase):
         ) as config_file:
             json.dump(config, config_file)
 
+    def read_config(self) -> dict:
+        with open(
+            os.path.join(self.config_dir, "config.json"), encoding="utf-8"
+        ) as config_file:
+            return json.load(config_file)
+
     def read_key_store(self) -> dict:
         with open(
             os.path.join(self.config_dir, "keys.json"), encoding="utf-8"

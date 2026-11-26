@@ -23,6 +23,7 @@ from services.postApi import (
     PosiApiServer,
     set_api_logger,
     set_serial_port,
+    set_runtime_providers,
     log_activities,
 )
 from services.logSvc import LogService
@@ -93,6 +94,10 @@ webhook_dispatcher = WebhookDispatcher(
     status_path=webhook_status_file,
     log=log_activities,
 )
+# Let the API compare a saved port with the one the live server is bound to.
+set_runtime_providers({
+    "bound_port": lambda: app_api_server.bound_port,
+})
 
 ## functions
 def write_resp():
