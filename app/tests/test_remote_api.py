@@ -1825,11 +1825,17 @@ class RestartTests(RestartTestCase):
         self.assertTrue(timer.daemon)
         self.assertEqual(timer.interval, postApi.RESTART_DELAY_SECONDS)
 
-        timer.fire()
+        with mock.patch.object(
+            postApi.controlSvc.secrets,
+            "token_hex",
+            return_value="deadbeef",
+        ):
+            timer.fire()
 
         self.assertEqual(self.read_request(), {
             "port": 9393,
             "server": "restart",
+            "restart_id": "deadbeef",
             "serial_port": "/dev/ttyUSB0",
             "baudrate": 9600,
             "unknown_key": "keep me",
@@ -1860,10 +1866,13 @@ class RestartTests(RestartTestCase):
         raw_key = self.add_api_key()
         self.restart(raw_key)
 
-        postApi._last_restart_at = (
-            time.monotonic() - postApi.RESTART_DEBOUNCE_SECONDS - 1
-        )
-        second = self.restart(raw_key)
+        now = time.monotonic()
+        with mock.patch.object(
+            postApi.time,
+            "monotonic",
+            return_value=now + postApi.RESTART_DEBOUNCE_SECONDS + 1,
+        ):
+            second = self.restart(raw_key)
 
         self.assertEqual(second.status_code, 202)
         self.assertEqual(len(FakeTimer.instances), 2)

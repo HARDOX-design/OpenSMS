@@ -293,6 +293,68 @@ class KeyStoreTests(unittest.TestCase):
                 {"sms:write", "settings:write"},
             )
 
+    def test_unmarked_v2_phone_aliases_do_not_mark_a_key_as_phone(self):
+        raw_key = "osms_unmarked_phone_name"
+        store = {
+            "version": 2,
+            "keys": [{
+                "id": "k_00000001",
+                "name": "opensms",
+                "hash": keySvc.hash_api_key(raw_key),
+                "scopes": ["sms:write", "settings:write"],
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "phone_owned": True,
+            }],
+        }
+        os.makedirs(self.first_dir, exist_ok=True)
+        with open(
+            os.path.join(self.first_dir, "keys.json"),
+            "w",
+            encoding="utf-8",
+        ) as keys_file:
+            json.dump(store, keys_file)
+
+        keySvc.rotate_phone_key(self.first_dir)
+
+        entries = keySvc.load_key_store(self.first_dir)[0]["keys"]
+        self.assertEqual(len(entries), 2)
+        old = next(entry for entry in entries if entry["id"] == "k_00000001")
+        self.assertEqual(old["owner"], "proxy")
+        self.assertIsNotNone(keySvc.authenticate_key(self.first_dir, raw_key))
+        self.assertEqual(
+            len([entry for entry in entries if entry["owner"] == "phone"]),
+            1,
+        )
+
+    def test_has_api_keys_does_not_persist_a_legacy_migration(self):
+        raw_key = "osms_legacy_read_only"
+        legacy_store = {
+            keySvc.hash_api_key(raw_key): {
+                "name": "legacy",
+                "scopes": ["sms:write"],
+            },
+        }
+        os.makedirs(self.first_dir, exist_ok=True)
+        with open(
+            os.path.join(self.first_dir, "keys.json"),
+            "w",
+            encoding="utf-8",
+        ) as keys_file:
+            json.dump(legacy_store, keys_file)
+
+        self.assertTrue(keySvc.has_api_keys(self.first_dir))
+
+        with open(
+            os.path.join(self.first_dir, "keys.json"), encoding="utf-8"
+        ) as keys_file:
+            self.assertEqual(json.load(keys_file), legacy_store)
+
+        self.assertIsNotNone(keySvc.authenticate_key(self.first_dir, raw_key))
+        with open(
+            os.path.join(self.first_dir, "keys.json"), encoding="utf-8"
+        ) as keys_file:
+            self.assertEqual(json.load(keys_file)["version"], 2)
+
     def test_concurrent_processes_can_delete_different_keys(self):
         keySvc.create_api_key(self.first_dir, "keep")
         first = keySvc.create_api_key(self.first_dir, "delete-first")

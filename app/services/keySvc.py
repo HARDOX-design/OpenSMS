@@ -128,45 +128,15 @@ def _now_iso() -> str:
 def _normalize_owner_value(value) -> str | None:
     if not isinstance(value, str):
         return None
-    normalized = value.strip().casefold().replace("-", "_")
-    if normalized in {
-        "phone",
-        "phone_key",
-        "phoneowned",
-        "phone_owned",
-    }:
-        return PHONE_KEY_OWNER
-    if normalized in {
-        "proxy",
-        "proxy_key",
-        "integration",
-    }:
-        return PROXY_KEY_OWNER
+    normalized = value.strip().casefold()
+    if normalized in {PHONE_KEY_OWNER, PROXY_KEY_OWNER}:
+        return normalized
     return None
 
 
 def _entry_owner(entry: dict) -> str | None:
-    """Read an explicit persisted ownership marker, without inferring by name."""
-    explicit_marker = False
-    for field in (KEY_OWNER_FIELD, "owned_by", "key_owner", "ownership"):
-        if field not in entry:
-            continue
-        explicit_marker = True
-        owner = _normalize_owner_value(entry.get(field))
-        if owner is not None:
-            return owner
-
-    for field in ("phone_owned", "is_phone_key"):
-        if field not in entry:
-            continue
-        explicit_marker = True
-        value = entry.get(field)
-        if isinstance(value, bool):
-            return PHONE_KEY_OWNER if value else PROXY_KEY_OWNER
-
-    if explicit_marker:
-        return PROXY_KEY_OWNER
-    return None
+    """Read the documented persisted ownership marker."""
+    return _normalize_owner_value(entry.get(KEY_OWNER_FIELD))
 
 
 def _is_phone_owned(entry: dict) -> bool:
@@ -175,7 +145,7 @@ def _is_phone_owned(entry: dict) -> bool:
 
 
 def _normalize_v2_keys(entries: list) -> tuple[list, bool]:
-    """Add explicit ownership to unmarked v2 entries and report pending writes."""
+    """Add the documented proxy marker to unmarked v2 entries."""
     normalized = []
     changed = False
     for entry in entries:
@@ -183,15 +153,7 @@ def _normalize_v2_keys(entries: list) -> tuple[list, bool]:
             changed = True
             continue
         current = dict(entry)
-        owner = _entry_owner(current)
-        if owner is None:
-            name = current.get("name")
-            owner = (
-                PHONE_KEY_OWNER
-                if isinstance(name, str)
-                and name.strip().casefold() == PHONE_KEY_NAME
-                else PROXY_KEY_OWNER
-            )
+        owner = _entry_owner(current) or PROXY_KEY_OWNER
         if current.get(KEY_OWNER_FIELD) != owner:
             current[KEY_OWNER_FIELD] = owner
             changed = True
@@ -280,9 +242,7 @@ def authenticate_key(config_dir: str, raw_key: str) -> dict | None:
 
 def has_api_keys(config_dir: str) -> bool:
     with _key_store_lock(config_dir):
-        store, migrated = load_key_store(config_dir)
-        if migrated:
-            _save_key_store(config_dir, store)
+        store, _ = load_key_store(config_dir)
     return bool(store["keys"])
 
 

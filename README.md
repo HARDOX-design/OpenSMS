@@ -187,7 +187,7 @@ curl -sS -X PUT 'http://192.168.1.50:9292/api/settings' \
   }'
 ```
 
-Omit `webhook.secret` to keep the stored secret, send `""` to clear it, or send a new string to replace it. Webhook and retry changes take effect immediately. A port change is two-step: the response sets `restart_required`, then call:
+Omit `webhook.secret` to keep the stored secret, send `""` to clear it, or send a new string to replace it. Webhook and retry changes take effect immediately. Changing `boot` is read at the next app launch; it does not start or stop the current service. A port change is two-step: the response sets `restart_required`, then call:
 
 ```bash
 curl -sS -X POST 'http://192.168.1.50:9292/api/server/restart' \

@@ -1,10 +1,10 @@
 from os.path import join, abspath, exists, dirname
 from threading import Thread
 
-import json
-import time
-import sys
+import os
 import signal
+import sys
+import time
 
 
 # OS specific
@@ -28,7 +28,7 @@ from services.postApi import (
 )
 from services.logSvc import LogService
 from services.config import app_name
-from services import controlSvc
+from services import controlSvc, settingsSvc
 from services.webhookSvc import (
     WebhookDispatcher,
     ack_inbox_message,
@@ -46,8 +46,9 @@ req_data = {}
 api_started = False
 serial_started = False
 # True when a handled Restart could not be normalised on disk; the loop then
-# suppresses the stale intent instead of restarting again.
+# suppresses that same intent instead of restarting again.
 restart_intent_handled = False
+handled_restart_id = None
 serial_mgr = None
 sms_receiver = None
 sms_receiver_context = None
@@ -110,22 +111,25 @@ set_runtime_providers({
 def write_resp():
     """ Write the response json on file. """
     global resp_template
-    with open(resp_file, "w") as rf:
-        json.dump(resp_template, rf)
+    settingsSvc.atomic_write_json(resp_file, resp_template)
 
 def read_req_file():
     """ Read the control file (intents from the API or the main app). """
-    global req_data, restart_intent_handled
+    global req_data, restart_intent_handled, handled_restart_id
     if not exists(req_file):
         return
     req_data = controlSvc.read_control(config_dir)
     intent = req_data.get(controlSvc.INTENT_KEY)
-    if restart_intent_handled and intent == controlSvc.INTENT_RESTART:
+    if restart_intent_handled and controlSvc.matches_restart(
+        req_data, handled_restart_id
+    ):
         # A handled Restart could not be persisted as "start"; do not let the
-        # stale file restart the server again.
+        # same stale intent restart the server again. A later Restart carries a
+        # new id and is handled normally.
         req_data[controlSvc.INTENT_KEY] = controlSvc.INTENT_START
     elif intent != controlSvc.INTENT_RESTART:
         restart_intent_handled = False
+        handled_restart_id = None
 
 def register_sms_receiver():
     """Register the Android SMS_RECEIVED receiver in this service process.
@@ -199,9 +203,10 @@ def restart_api_server():
     The control intent is normalised back to "start" after the new server has
     been asked to start, so the 0.2 s poll cannot trigger the Restart again.
     """
-    global req_data, restart_intent_handled
+    global req_data, restart_intent_handled, handled_restart_id
     port = controlSvc.effective_port(config_dir)
     req_data["port"] = port
+    restart_id = req_data.get(controlSvc.RESTART_ID_KEY)
     if not stop_api_server():
         # Never add a second listener while the previous one is still up; the
         # intent stays "restart" so the next poll retries the stop.
@@ -212,8 +217,10 @@ def restart_api_server():
     try:
         controlSvc.normalise_restart(config_dir, port)
         restart_intent_handled = False
+        handled_restart_id = None
     except Exception as e:
         restart_intent_handled = True
+        handled_restart_id = restart_id
         print(f"Could not normalise the Restart intent: {e}")
         log_activities(f"Could not normalise the Restart intent: {e}")
 

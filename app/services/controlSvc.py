@@ -7,6 +7,7 @@ Kivy, jnius and Android imports, so Restart handling can be tested anywhere.
 
 import json
 import os
+import secrets
 
 from services import settingsSvc
 
@@ -16,6 +17,7 @@ INTENT_KEY = "server"
 INTENT_START = "start"
 INTENT_STOP = "stop"
 INTENT_RESTART = "restart"
+RESTART_ID_KEY = "restart_id"
 
 ## Read and write
 
@@ -78,11 +80,25 @@ def request_restart(config_dir: str, port: int) -> dict:
     control = read_control(config_dir)
     control["port"] = port
     control[INTENT_KEY] = INTENT_RESTART
+    control[RESTART_ID_KEY] = secrets.token_hex(8)
     write_control(config_dir, control)
     return control
 
 def restart_pending(config_dir: str) -> bool:
     return intent(config_dir) == INTENT_RESTART
+
+def matches_restart(control: dict, restart_id) -> bool:
+    """Whether `control` is the same Restart request as `restart_id`.
+
+    The service uses this to suppress a stale intent that could not be
+    normalised, while still accepting a later Restart with a new id.
+    """
+    if control.get(INTENT_KEY) != INTENT_RESTART:
+        return False
+    if restart_id is None:
+        # A pre-upgrade intent has no id; treat it as the same stale request.
+        return RESTART_ID_KEY not in control
+    return control.get(RESTART_ID_KEY) == restart_id
 
 def normalise_restart(config_dir: str, port: int | None = None) -> bool:
     """Turn a handled Restart back into a plain start, preserving other keys.

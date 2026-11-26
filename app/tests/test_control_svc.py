@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -112,11 +113,13 @@ class ControlPreservationTests(ControlTestCase):
             "unknown_key": "keep me",
         })
 
-        controlSvc.request_restart(self.config_dir, 9393)
+        result = controlSvc.request_restart(self.config_dir, 9393)
 
+        self.assertTrue(result["restart_id"])
         self.assertEqual(self.read_control(), {
             "port": 9393,
             "server": "restart",
+            "restart_id": result["restart_id"],
             "serial_port": "/dev/ttyUSB0",
             "baudrate": 9600,
             "unknown_key": "keep me",
@@ -127,6 +130,7 @@ class ControlPreservationTests(ControlTestCase):
         self.write_control({
             "port": 9393,
             "server": "restart",
+            "restart_id": "deadbeef",
             "serial_port": "/dev/ttyUSB0",
             "baudrate": 9600,
             "unknown_key": "keep me",
@@ -138,11 +142,31 @@ class ControlPreservationTests(ControlTestCase):
         self.assertEqual(self.read_control(), {
             "port": 9393,
             "server": "start",
+            "restart_id": "deadbeef",
             "serial_port": "/dev/ttyUSB0",
             "baudrate": 9600,
             "unknown_key": "keep me",
         })
         self.assertEqual(self.tmp_files(), [])
+
+    def test_a_new_restart_gets_a_new_id_and_is_not_the_same_intent(self):
+        with mock.patch.object(
+            controlSvc.secrets,
+            "token_hex",
+            side_effect=["aaaa", "bbbb"],
+        ):
+            first = controlSvc.request_restart(self.config_dir, 9393)
+            second = controlSvc.request_restart(self.config_dir, 9393)
+
+        self.assertEqual(first["restart_id"], "aaaa")
+        self.assertEqual(second["restart_id"], "bbbb")
+        self.assertTrue(controlSvc.matches_restart(first, "aaaa"))
+        self.assertFalse(controlSvc.matches_restart(second, "aaaa"))
+        self.assertFalse(controlSvc.matches_restart({"server": "start"}, "aaaa"))
+        self.assertTrue(controlSvc.matches_restart({"server": "restart"}, None))
+        self.assertFalse(controlSvc.matches_restart(
+            {"server": "restart", "restart_id": "aaaa"}, None
+        ))
 
     def test_normalising_without_a_port_uses_the_effective_port(self):
         self.write_settings(9393)

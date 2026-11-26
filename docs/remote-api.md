@@ -58,7 +58,7 @@ Other facts that constrain the work:
 |---|---|
 | Processes | Kivy UI and the `opensmssvc` foreground service are separate. The API server runs in the service. |
 | `config.json` | Whole-object writes from the UI (`main.py:353-366`), atomic, no revision, no lock. Webhook config is re-read per delivery attempt (`webhookSvc.py:50-57`). |
-| `request.json` | UI→service command channel polled every 0.2 s (`appSvc.py:233-260`); written non-atomically (`main.py:368-370`). |
+| `request.json` | UI→service command channel polled every 0.2 s (`appSvc.py:233-260`); written atomically through `controlSvc`. |
 | Restart | No restart path exists. `api_server_control` handles only `start`/`stop` (`appSvc.py:156-170`), and `start` uses `req_data["port"]`. |
 | Keys | One key. `generate_new_api_key()` overwrites `keys.json` (`postApi.py:92-109`). Raw format `osms_<token_urlsafe(32)>`. |
 | Outbox | Capacity drop-oldest at enqueue; `max_attempts` then drop (`webhookSvc.py:318-339`, `386-415`). Retry knobs are constructor-fixed; only `enabled`/`url`/`secret` hot-reload per attempt. |
@@ -104,7 +104,7 @@ Other facts that constrain the work:
 | D6 | `config.json` is the single source of truth for the port. `request.json` carries intents; the Restart intent includes the port to start with, used only as a fallback. | The UI currently seeds the port twice; one owner removes a class of drift. |
 | D7 | All JSON writes are atomic: temp file in the same directory, `os.replace`. | A 0.2 s poller can otherwise read a partial file. |
 | D8 | The UI re-reads `config.json` on Settings entry and merges on save through `settingsSvc`, preserving `revision` and unknown fields. | Today the UI holds a stale whole-object cache and clobbers remote changes. |
-| D9 | `keys.json` v2: array of `{id, name, hash, scopes, created_at}`. Refuse to delete the last key (`409`). UI rotation replaces only the key named `opensms`. | Named keys need stable ids; nuking proxy-owned keys from the phone would be hostile. |
+| D9 | `keys.json` v2: array of `{id, name, hash, scopes, created_at, owner}`. Refuse to delete the last key (`409`). UI rotation replaces only the phone-owned key. | Named keys need stable ids; nuking proxy-owned keys from the phone would be hostile. |
 | D10 | Status is best-effort: runtime providers first, files second, honest `null`/`"unknown"` when neither exists. Add `warnings[]`. | `resp.json` records transitions, not liveness. |
 | D11 | Retry policy (`timeout`, `max_attempts`, `backoff`, `capacity`) is a setting, read live per attempt/enqueue. Defaults stay exactly today's constants. | This is the data-loss mitigation; it belongs in the first release, not a follow-up. |
 | D12 | Tests use `unittest` + `TestClient` against a temporary config dir. `httpx` becomes a dev-only dependency. Add a test workflow. | No Android needed; today nothing runs the suite. |
@@ -307,7 +307,8 @@ Write procedure:
 current state, not about this request: a previously pending port change also
 reports `true`.
 
-Changing `boot` or the webhook never requires a restart.
+Changing `boot` is read at the next app launch; it does not affect the current
+service. Changing the Webhook or retry fields never requires a restart.
 
 ### 6.6 `POST /api/webhook/test`
 
@@ -344,8 +345,11 @@ Rules:
   control-file write **after** the response (`RESTART_DELAY = 0.4 s`), and
   returns.
 - The intent is written atomically as
-  `{"port": <effective port>, "server": "restart"}` merged into the existing
-  `request.json`, preserving `serial_port`, `baudrate`, and unknown keys.
+  `{"port": <effective port>, "server": "restart", "restart_id": "<token>"}`
+  merged into the existing `request.json`, preserving `serial_port`,
+  `baudrate`, and unknown keys. The service uses `restart_id` to suppress only
+  the stale intent that could not be normalised; a later Restart gets a new id
+  and is handled normally.
 - The handler never calls `PosiApiServer.stop()`.
 
 Service side (`appSvc`):
@@ -459,7 +463,8 @@ delivered. Numbers must be E.164. Default SIM only.
       "name": "sms-proxy",
       "hash": "<sha256 hex>",
       "scopes": ["settings:write", "sms:write"],
-      "created_at": "2026-11-26T12:00:00+00:00"
+      "created_at": "2026-11-26T12:00:00+00:00",
+      "owner": "proxy"
     }
   ]
 }
