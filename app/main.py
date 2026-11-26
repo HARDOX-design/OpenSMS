@@ -40,7 +40,7 @@ from screens.mainScr import ButtonControl, EndPointUrl, DocButton, SerialCard
 from screens.settings import SettingsBox, ApiKeyTxtbox
 
 # import services
-from services import settingsSvc
+from services import settingsSvc, controlSvc
 from services.postApi import has_api_keys, generate_new_api_key
 from services.netSvc import get_network_ips
 from services.config import __version__, app_name
@@ -175,7 +175,6 @@ class OpenSmsApp(MDApp):
             self.internal_storage = app_storage_path()
             self.config_dir = os.path.join(self.internal_storage, 'config')
             os.makedirs(self.config_dir, exist_ok=True)
-            self.request_path = os.path.join(self.config_dir, "request.json")
             self.resp_path = os.path.join(self.config_dir, "resp.json")
             svc_running = False
             # start the listner service on Android
@@ -195,7 +194,6 @@ class OpenSmsApp(MDApp):
             self.internal_storage = get_user_data_dir(self.config_template["app"])
             self.config_dir = os.path.join(self.internal_storage, 'config')
             os.makedirs(self.config_dir, exist_ok=True)
-            self.request_path = os.path.join(self.config_dir, "request.json")
             self.resp_path = os.path.join(self.config_dir, "resp.json")
             self.write_request()
             # Serial setup
@@ -368,8 +366,7 @@ class OpenSmsApp(MDApp):
                     os.remove(tmp_path)
 
     def write_request(self):
-        with open(self.request_path, "w") as rf:
-            json.dump(self.req_template, rf)
+        controlSvc.write_control(self.config_dir, self.req_template)
 
     def clear_api_details(self):
         endpoint_box = self.root.ids.home_scr.ids.endpoint_box

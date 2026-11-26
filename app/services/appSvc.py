@@ -28,6 +28,7 @@ from services.postApi import (
 )
 from services.logSvc import LogService
 from services.config import app_name
+from services import controlSvc
 from services.webhookSvc import (
     WebhookDispatcher,
     ack_inbox_message,
@@ -44,6 +45,9 @@ resp_template = {
 req_data = {}
 api_started = False
 serial_started = False
+# True when a handled Restart could not be normalised on disk; the loop then
+# suppresses the stale intent instead of restarting again.
+restart_intent_handled = False
 serial_mgr = None
 sms_receiver = None
 sms_receiver_context = None
@@ -110,14 +114,18 @@ def write_resp():
         json.dump(resp_template, rf)
 
 def read_req_file():
-    """ Read the command file from file (Instrunctions from main app). """
-    global req_data
-    if exists(req_file):
-        try:
-            with open(req_file, "r") as rf:
-                req_data = json.load(rf)
-        except Exception as e:
-            print(f"Error while reading config from svc: {e}")
+    """ Read the control file (intents from the API or the main app). """
+    global req_data, restart_intent_handled
+    if not exists(req_file):
+        return
+    req_data = controlSvc.read_control(config_dir)
+    intent = req_data.get(controlSvc.INTENT_KEY)
+    if restart_intent_handled and intent == controlSvc.INTENT_RESTART:
+        # A handled Restart could not be persisted as "start"; do not let the
+        # stale file restart the server again.
+        req_data[controlSvc.INTENT_KEY] = controlSvc.INTENT_START
+    elif intent != controlSvc.INTENT_RESTART:
+        restart_intent_handled = False
 
 def register_sms_receiver():
     """Register the Android SMS_RECEIVED receiver in this service process.
@@ -161,21 +169,53 @@ def unregister_sms_receiver():
     sms_receiver = None
     sms_receiver_context = None
 
-def api_server_control(api_stat: str):
-    """ Turns API server on/off """
+def stop_api_server() -> bool:
+    """ Stop the API server, reporting whether it exited in time. """
     global api_started
-    global resp_template
-    global req_data
+    stopped = app_api_server.stop()
+    api_started = False
+    return stopped
+
+def api_server_control(api_stat: str, port: int | None = None):
+    """ Turns API server on/off """
+    global api_started, resp_template
     print(req_data)
     if api_stat == "stop":
-        app_api_server.stop()
-        api_started = False
-        resp_template["server"] = "stopped"
+        if stop_api_server():
+            resp_template["server"] = "stopped"
     elif api_stat == "start":
-        app_api_server.start(req_data["port"])
+        # Settings own the port; the control file is only a fallback.
+        start_port = (
+            port if port is not None else controlSvc.effective_port(config_dir)
+        )
+        app_api_server.start(start_port)
         api_started = True
         resp_template["server"] = "started"
     Thread(target=write_resp, daemon=True).start()
+
+def restart_api_server():
+    """ Stop once, then start again on the effective port.
+
+    The control intent is normalised back to "start" after the new server has
+    been asked to start, so the 0.2 s poll cannot trigger the Restart again.
+    """
+    global req_data, restart_intent_handled
+    port = controlSvc.effective_port(config_dir)
+    req_data["port"] = port
+    if not stop_api_server():
+        # Never add a second listener while the previous one is still up; the
+        # intent stays "restart" so the next poll retries the stop.
+        print("Restart deferred: the previous server has not stopped yet")
+        return
+    time.sleep(0.5)
+    api_server_control("start", port)
+    try:
+        controlSvc.normalise_restart(config_dir, port)
+        restart_intent_handled = False
+    except Exception as e:
+        restart_intent_handled = True
+        print(f"Could not normalise the Restart intent: {e}")
+        log_activities(f"Could not normalise the Restart intent: {e}")
 
 def serial_conn_control(cmd:str):
     global serial_started
@@ -247,10 +287,12 @@ def app_service_thread():
                 register_sms_receiver()
 
             # handle api server
-            server_stat = req_data.get("server", "")
-            if not api_started and server_stat == "start":
+            server_stat = req_data.get(controlSvc.INTENT_KEY, "")
+            if server_stat == controlSvc.INTENT_RESTART:
+                restart_api_server()
+            elif not api_started and server_stat == controlSvc.INTENT_START:
                 api_server_control("start")
-            elif api_started and server_stat == "stop":
+            elif api_started and server_stat == controlSvc.INTENT_STOP:
                 api_server_control("stop")
 
             # handle serial request

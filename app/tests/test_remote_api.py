@@ -1184,3 +1184,176 @@ class WebhookTestTests(ApiTestCase):
         self.assertEqual(response.status_code, 403)
 
         self.assertEqual(self.target.count, 0)
+
+
+class FakeTimer:
+    """A threading.Timer that records its callback instead of firing."""
+
+    instances = []
+
+    def __init__(self, interval, target=None, args=(), kwargs=None):
+        self.interval = interval
+        self.target = target
+        self.args = args
+        self.kwargs = kwargs or {}
+        self.started = False
+        self.daemon = False
+        FakeTimer.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def fire(self):
+        self.target(*self.args, **self.kwargs)
+
+
+class RestartTestCase(ApiTestCase):
+
+    def setUp(self):
+        super().setUp()
+        FakeTimer.instances = []
+        postApi.set_runtime_providers({"running": lambda: True})
+        self.timer_patch = mock.patch.object(postApi, "Timer", FakeTimer)
+        self.timer_patch.start()
+
+    def tearDown(self):
+        self.timer_patch.stop()
+        super().tearDown()
+
+    def request_path(self) -> str:
+        return os.path.join(self.config_dir, postApi.controlSvc.CONTROL_FILE)
+
+    def read_request(self):
+        with open(self.request_path(), encoding="utf-8") as request_file:
+            return json.load(request_file)
+
+    def write_request(self, value: dict):
+        with open(self.request_path(), "w", encoding="utf-8") as request_file:
+            json.dump(value, request_file)
+
+    def restart(self, raw_key: str):
+        return self.client.post(
+            "/api/server/restart", headers=self.auth(raw_key)
+        )
+
+
+class RestartTests(RestartTestCase):
+
+    def test_restart_is_acknowledged_before_the_intent_is_written(self):
+        self.write_config({"port": 9393, "boot": False, "webhook": {}})
+        self.write_request({
+            "port": 9292,
+            "server": "start",
+            "serial_port": "/dev/ttyUSB0",
+            "baudrate": 9600,
+            "unknown_key": "keep me",
+        })
+        raw_key = self.add_api_key()
+
+        with mock.patch.object(postApi.PosiApiServer, "stop") as stop_server:
+            response = self.restart(raw_key)
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json(), {
+            "status": "restarting",
+            "port": 9393,
+        })
+        stop_server.assert_not_called()
+        # The response is already back while the control file still says start.
+        self.assertEqual(self.read_request()["server"], "start")
+        self.assertEqual(len(FakeTimer.instances), 1)
+        timer = FakeTimer.instances[0]
+        self.assertTrue(timer.started)
+        self.assertTrue(timer.daemon)
+        self.assertEqual(timer.interval, postApi.RESTART_DELAY_SECONDS)
+
+        timer.fire()
+
+        self.assertEqual(self.read_request(), {
+            "port": 9393,
+            "server": "restart",
+            "serial_port": "/dev/ttyUSB0",
+            "baudrate": 9600,
+            "unknown_key": "keep me",
+        })
+
+    def test_the_restart_uses_the_effective_port_over_the_control_port(self):
+        self.write_config({"port": 9393, "boot": False, "webhook": {}})
+        self.write_request({"port": 9292, "server": "start"})
+        raw_key = self.add_api_key()
+
+        response = self.restart(raw_key)
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["port"], 9393)
+
+    def test_a_second_restart_within_five_seconds_is_refused(self):
+        raw_key = self.add_api_key()
+
+        first = self.restart(raw_key)
+        second = self.restart(raw_key)
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 409)
+        self.assertIsInstance(second.json()["detail"], str)
+        self.assertEqual(len(FakeTimer.instances), 1)
+
+    def test_the_debounce_lifts_after_five_seconds(self):
+        raw_key = self.add_api_key()
+        self.restart(raw_key)
+
+        postApi._last_restart_at = (
+            time.monotonic() - postApi.RESTART_DEBOUNCE_SECONDS - 1
+        )
+        second = self.restart(raw_key)
+
+        self.assertEqual(second.status_code, 202)
+        self.assertEqual(len(FakeTimer.instances), 2)
+
+    def test_a_failed_intent_write_releases_the_debounce(self):
+        raw_key = self.add_api_key()
+        self.assertEqual(self.restart(raw_key).status_code, 202)
+
+        with mock.patch.object(
+            postApi.controlSvc,
+            "request_restart",
+            side_effect=OSError("disk full"),
+        ):
+            FakeTimer.instances[-1].fire()
+
+        self.assertFalse(os.path.exists(self.request_path()))
+        retry = self.restart(raw_key)
+        self.assertEqual(retry.status_code, 202)
+
+    def test_a_restart_is_refused_while_the_server_is_not_running(self):
+        postApi.set_runtime_providers({"running": lambda: False})
+        raw_key = self.add_api_key()
+
+        response = self.restart(raw_key)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIsInstance(response.json()["detail"], str)
+        self.assertFalse(os.path.exists(self.request_path()))
+        self.assertEqual(FakeTimer.instances, [])
+
+    def test_restart_requires_authentication_and_the_settings_scope(self):
+        response = self.client.post("/api/server/restart")
+        self.assertEqual(response.status_code, 403)
+
+        raw_key = self.add_api_key(scopes=("sms:write",))
+        response = self.restart(raw_key)
+        self.assertEqual(response.status_code, 403)
+
+        self.assertEqual(FakeTimer.instances, [])
+
+
+class ControlRouteTests(ApiTestCase):
+
+    def test_the_superseded_control_route_is_gone(self):
+        raw_key = self.add_api_key()
+
+        response = self.client.post(
+            "/control/", json={"api": "start"}, headers=self.auth(raw_key)
+        )
+
+        self.assertEqual(response.status_code, 404)

@@ -129,6 +129,11 @@ def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def is_valid_port(value) -> bool:
+    """Whether `value` is a JSON integer inside the API port range."""
+    return _is_int(value) and PORT_MIN <= value <= PORT_MAX
+
+
 def _unknown_field_error(prefix: str, unknown) -> SettingsValidationError:
     names = ", ".join(sorted(unknown))
     return SettingsValidationError(f"Unknown field(s) in {prefix}: {names}")
@@ -156,7 +161,7 @@ def validate_settings_payload(payload) -> dict:
         raise SettingsValidationError("revision must be an integer")
 
     port = payload["port"]
-    if not _is_int(port) or not PORT_MIN <= port <= PORT_MAX:
+    if not is_valid_port(port):
         raise SettingsValidationError(
             f"port must be an integer between {PORT_MIN} and {PORT_MAX}"
         )

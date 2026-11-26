@@ -3,7 +3,7 @@ import secrets
 import asyncio
 import time
 from datetime import datetime, timezone
-from threading import Thread, Lock
+from threading import Thread, Lock, Timer
 from os.path import join
 from urllib.parse import urlparse
 import json
@@ -21,7 +21,7 @@ from services.pathMgr import get_os_platform
 from services.smsApi import SmsCrossPlatform, clean_and_validate_phone
 from services.logSvc import LogService
 from services.config import __version__, app_name
-from services import netSvc, settingsSvc, webhookSvc
+from services import netSvc, settingsSvc, controlSvc, webhookSvc
 
 # OS specific
 #try:
@@ -48,8 +48,14 @@ SCOPE_SETTINGS = "settings:write"
 _config_dir: str | None = None
 _runtime: dict = {}
 _last_restart_at: float | None = None
+_restart_lock = Lock()
 _started_at: float | None = None
 _key_lock = Lock()
+
+# Restart orchestration. The handler acknowledges before anything stops, and
+# the control intent is written only after the response has had time to leave.
+RESTART_DELAY_SECONDS = 0.4
+RESTART_DEBOUNCE_SECONDS = 5.0
 
 ## OS specific setups
 # for android
@@ -236,12 +242,6 @@ class SmsData(BaseModel):
     text: str
     #sub_text: str | None = None
 
-class ControlData(BaseModel):
-    """
-    This is not yet implemented. Placeholder only.
-    """
-    api: str
-
 # FastAPI app
 app = FastAPI()
 security = HTTPBearer(auto_error=False)
@@ -326,15 +326,26 @@ class PosiApiServer:
     # ----------------------------
     # Public stop
     # ----------------------------
-    def stop(self):
+    def stop(self) -> bool:
+        """Stop the server; False when its thread outlived the join timeout.
+
+        Leaving `thread` in place on a timeout keeps `start()` from adding a
+        second listener while the first is still shutting down.
+        """
         if self.server:
             print("Stopping FastAPI...")
             self.server.should_exit = True
+        stopped = True
         if self.thread:
             self.thread.join(timeout=5)
+            stopped = not self.thread.is_alive()
         self.server = None
-        self.thread = None
-        print("FastAPI stopped")
+        if stopped:
+            self.thread = None
+            print("FastAPI stopped")
+        else:
+            print("FastAPI did not stop within 5 seconds")
+        return stopped
 
 # handle post requests
 
@@ -595,6 +606,30 @@ def _restart_required(settings: dict) -> bool:
     except (TypeError, ValueError):
         return False
 
+def _write_restart_intent(config_dir: str, port: int):
+    global _last_restart_at
+    try:
+        controlSvc.request_restart(config_dir, port)
+    except Exception as exc:
+        # The 202 has already promised nothing is written yet; let a retry
+        # through instead of debouncing a Restart that never happened.
+        with _restart_lock:
+            _last_restart_at = None
+        print(f"Could not write the Restart intent: {exc}")
+        log_activities(f"Could not write the Restart intent: {exc}")
+
+
+def _schedule_restart(config_dir: str, port: int):
+    """Write the control intent after the 202 has had time to reach the client."""
+    timer = Timer(
+        RESTART_DELAY_SECONDS,
+        _write_restart_intent,
+        args=(config_dir, port),
+    )
+    timer.daemon = True
+    timer.start()
+
+
 @app.put("/api/settings")
 async def api_put_settings(
     request: Request,
@@ -753,6 +788,45 @@ async def api_webhook_test(
     )
 
 
+@app.post("/api/server/restart", status_code=202)
+async def api_server_restart(
+    client: dict = Depends(require_scope(SCOPE_SETTINGS))
+):
+    """Acknowledge a Restart, then hand the intent to the service loop.
+
+    The handler never stops its own server: stopping uvicorn from inside a
+    request risks answering into a dead socket.
+    """
+    global _last_restart_at
+
+    if not _status_runtime("running", True):
+        raise HTTPException(
+            status_code=409,
+            detail="The API server is not running",
+        )
+
+    now = time.monotonic()
+    with _restart_lock:
+        if (
+            _last_restart_at is not None
+            and now - _last_restart_at < RESTART_DEBOUNCE_SECONDS
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "A Restart was requested less than "
+                    f"{RESTART_DEBOUNCE_SECONDS:g} seconds ago"
+                ),
+            )
+        _last_restart_at = now
+
+    config_dir = get_config_dir()
+    port = controlSvc.effective_port(config_dir)
+    _schedule_restart(config_dir, port)
+    log_activities(f"Restart requested on port {port}")
+    return {"status": "restarting", "port": port}
+
+
 @app.post("/sms/")
 async def process_sms_req(
     item: SmsData,
@@ -790,15 +864,6 @@ async def process_sms_req(
         ).start()
 
     return {"stat": stat}
-
-@app.post("/control/")
-async def internal_control(
-    item: ControlData,
-    request: Request,
-    client: dict = Depends(verify_api_key)
-):
-    server: PosiApiServer = request.app.state.server
-    return item
 
 # test locally
 if __name__ == "__main__":
