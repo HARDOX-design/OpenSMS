@@ -344,6 +344,72 @@ def apply_writable_settings(settings: dict, writable: dict) -> dict:
     return updated
 
 
+def merge_local_settings(current: dict, form: dict) -> dict:
+    """Overlay the fields the on-device form owns on freshly read Settings.
+
+    Fields the form does not own keep the value that was just read: the
+    Webhook retry settings, the secret when the form left it untouched, and
+    every internal or unknown on-disk field. This is what lets a change made
+    over the network survive a later local save.
+    """
+    if not isinstance(form, dict):
+        raise SettingsValidationError("Request body must be a JSON object")
+
+    unknown = set(form) - TOP_LEVEL_FIELDS
+    if unknown:
+        raise _unknown_field_error("request", unknown)
+
+    fresh = writable_settings(current)
+    merged = {
+        "port": fresh["port"],
+        "boot": fresh["boot"],
+        "webhook": {
+            field: fresh["webhook"][field]
+            for field in WRITABLE_WEBHOOK_FIELDS
+        },
+    }
+    for field in ("port", "boot"):
+        if field in form:
+            merged[field] = form[field]
+    if "revision" in form:
+        merged["revision"] = form["revision"]
+    if "webhook" in form:
+        form_webhook = form["webhook"]
+        if not isinstance(form_webhook, dict):
+            raise SettingsValidationError("webhook must be an object")
+        unknown = set(form_webhook) - WEBHOOK_FIELDS
+        if unknown:
+            raise _unknown_field_error("webhook", unknown)
+        merged["webhook"].update(form_webhook)
+    return merged
+
+
+def _store_writable(
+    config_path: str, writable: dict, expected_revision: int | None
+) -> dict:
+    """Validate and persist a normalized writable subset.
+
+    The caller must hold `_write_lock`, so the read-merge-write stays in one
+    process-local critical section.
+    """
+    current = load_settings(config_path)
+    if expected_revision is None:
+        expected_revision = writable.get("revision")
+    if (
+        expected_revision is not None
+        and expected_revision != get_revision(current)
+    ):
+        raise SettingsRevisionConflict(
+            expected_revision, get_revision(current)
+        )
+    validate_business_rules(writable)
+    merged = apply_writable_settings(current, writable)
+    validate_merged_settings(merged)
+    merged["revision"] = get_revision(current) + 1
+    atomic_write_json(config_path, merged)
+    return merged
+
+
 def save_settings(config_path: str, payload, expected_revision: int | None = None) -> dict:
     """Validated read-merge-write of the writable Settings subset.
 
@@ -354,22 +420,25 @@ def save_settings(config_path: str, payload, expected_revision: int | None = Non
     """
     writable = validate_settings_payload(payload)
     with _write_lock:
+        return _store_writable(config_path, writable, expected_revision)
+
+
+def save_local_settings(
+    config_path: str, form: dict, expected_revision: int | None = None
+) -> dict:
+    """Save the on-device form's fields over a fresh read of Settings.
+
+    `form` carries only the fields the screen owns (port, boot, and some
+    Webhook fields). Everything else keeps its freshly read value, so a remote
+    change is not undone and the Revision is bumped rather than reset.
+    Validation is the same one the API uses.
+    """
+    with _write_lock:
         current = load_settings(config_path)
-        if expected_revision is None:
-            expected_revision = writable.get("revision")
-        if (
-            expected_revision is not None
-            and expected_revision != get_revision(current)
-        ):
-            raise SettingsRevisionConflict(
-                expected_revision, get_revision(current)
-            )
-        validate_business_rules(writable)
-        merged = apply_writable_settings(current, writable)
-        validate_merged_settings(merged)
-        merged["revision"] = get_revision(current) + 1
-        atomic_write_json(config_path, merged)
-        return merged
+        writable = validate_settings_payload(
+            merge_local_settings(current, form)
+        )
+        return _store_writable(config_path, writable, expected_revision)
 
 
 def atomic_write_json(path: str, data):

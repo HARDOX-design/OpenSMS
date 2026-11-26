@@ -40,13 +40,13 @@ from screens.mainScr import ButtonControl, EndPointUrl, DocButton, SerialCard
 from screens.settings import SettingsBox, ApiKeyTxtbox
 
 # import services
+from services import settingsSvc
 from services.postApi import has_api_keys, generate_new_api_key
 from services.netSvc import get_network_ips
 from services.config import __version__, app_name
 from services.webhookSvc import (
     default_webhook_config,
     format_webhook_status,
-    get_webhook_config,
     is_valid_target,
     normalize_webhook_config,
     read_webhook_status,
@@ -121,6 +121,11 @@ class OpenSmsApp(MDApp):
         self.serial_dropdown_menu = None
         self.webhook_status_path = None
         self.webhook_switch_guard = False
+        self.port_loaded = None
+        self.boot_loaded = False
+        self.webhook_enabled_loaded = False
+        self.webhook_url_loaded = ""
+        self.webhook_secret_loaded = ""
         self.config_template = {
             "app": app_name,
             "port": 9292,
@@ -215,17 +220,17 @@ class OpenSmsApp(MDApp):
             self.config_dir, "webhook_status.json"
         )
         auto_start_sw = self.root.ids.settings_scr.ids.auto_start_sw
-        port_no_inp = self.root.ids.settings_scr.ids.port_no_inp
         if os.path.exists(self.app_config):
-            with open(self.app_config, "r", encoding="utf-8") as cf:
-                saved_config = json.load(cf)
-            self.config_template["port"] = int(saved_config["port"])
-            self.config_template["boot"] = saved_config["boot"]
-            self.config_template["permissions"] = saved_config.get("permissions", False)
-            self.config_template["webhook"] = normalize_webhook_config(
-                saved_config.get("webhook")
+            saved_config = settingsSvc.load_settings(self.app_config)
+            self.config_template = saved_config
+            self.config_template["port"] = int(
+                saved_config.get("port") or settingsSvc.DEFAULT_PORT
             )
-            webhook_cfg = self.config_template["webhook"]
+            self.config_template["boot"] = bool(saved_config.get("boot"))
+            self.config_template["permissions"] = bool(
+                saved_config.get("permissions", False)
+            )
+            webhook_cfg = normalize_webhook_config(saved_config.get("webhook"))
             print(
                 "start config check: "
                 f"port={self.config_template['port']}, "
@@ -243,8 +248,7 @@ class OpenSmsApp(MDApp):
                 auto_start_sw.active = False
         else:
             self.write_app_conf()
-        port_no_inp.text = str(self.config_template["port"])
-        self.refresh_webhook_view()
+        self.refresh_settings_view()
         self.check_if_key_exists()
         self.stop_resp_loop()
         self.resp_thred = Thread(target=self.resp_check_loop, daemon=True)
@@ -624,22 +628,48 @@ class OpenSmsApp(MDApp):
 
     ## Settings sections
     def save_settings(self, instance=None, control_txt="none"):
-        port_no_inp = self.root.ids.settings_scr.ids.port_no_inp
+        boot = None
         if control_txt == "switch":
-            self.config_template["boot"] = not self.config_template["boot"]
-        if port_no_inp.text != "":
-            port_no = int(port_no_inp.text)
-            if port_no >= 1025:
-                self.config_template["port"] = port_no
-                self.req_template["port"] = port_no
-        webhook_enabled, webhook_url, webhook_secret = self.read_webhook_inputs()
-        if not self.validate_webhook(webhook_enabled, webhook_url):
+            boot = not self.config_template["boot"]
+        form = self.read_settings_form(boot=boot)
+        if form is None:
             return
-        self.save_webhook_config(
-            webhook_enabled, webhook_url, webhook_secret
+        if not self.persist_settings_form(form):
+            return
+        print(
+            f"Service on start: {self.config_template['boot']}, "
+            f"port: {self.config_template['port']}"
         )
-        print(f"Service on start: {self.config_template["boot"]}, port: {self.config_template["port"]}")
         Clock.schedule_once(lambda dt: self.show_toast_msg("Settings has been saved."))
+
+    def read_settings_form(self, boot=None):
+        """Return the form-owned writable subset, or None when it is invalid.
+
+        Only fields the operator actually edited are carried; everything else
+        is filled from a fresh read when the form is persisted, so a remote
+        change to a field left alone on this screen survives the save.
+        """
+        settings = self.root.ids.settings_scr.ids
+        form = {}
+        port_text = (settings.port_no_inp.text or "").strip()
+        if port_text != self.port_loaded:
+            try:
+                form["port"] = int(port_text)
+            except ValueError:
+                self.show_toast_msg(
+                    "Port must be an integer between "
+                    f"{settingsSvc.PORT_MIN} and {settingsSvc.PORT_MAX}",
+                    is_error=True,
+                )
+                return None
+        boot_value = self.config_template["boot"] if boot is None else boot
+        if boot_value != self.boot_loaded:
+            form["boot"] = boot_value
+        webhook = self.read_webhook_form()
+        if webhook is None:
+            return None
+        form["webhook"] = webhook
+        return form
 
     def read_webhook_inputs(self):
         settings = self.root.ids.settings_scr.ids
@@ -649,13 +679,41 @@ class OpenSmsApp(MDApp):
             settings.webhook_secret_inp.text.strip(),
         )
 
-    def save_webhook_config(self, enabled: bool, url: str, secret: str):
-        self.config_template["webhook"] = {
-            "enabled": enabled,
-            "url": url,
-            "secret": secret,
-        }
-        Thread(target=self.write_app_conf, daemon=True).start()
+    def read_webhook_form(self):
+        """Return the Webhook fields the operator edited, or None when invalid.
+
+        The secret and target follow the same rule as the port: an untouched
+        field is omitted, so a change made over the network is preserved.
+        """
+        enabled, url, secret = self.read_webhook_inputs()
+        if not self.validate_webhook(enabled, url):
+            return None
+        webhook = {}
+        if enabled != self.webhook_enabled_loaded:
+            webhook["enabled"] = enabled
+        if url != self.webhook_url_loaded:
+            webhook["url"] = url
+        if secret != self.webhook_secret_loaded:
+            webhook["secret"] = secret
+        return webhook
+
+    def persist_settings_form(self, form):
+        """Merge the form over fresh Settings and persist it atomically."""
+        try:
+            saved = settingsSvc.save_local_settings(self.app_config, form)
+        except settingsSvc.SettingsValidationError as exc:
+            self.show_toast_msg(str(exc), is_error=True)
+            return False
+        self.apply_persisted_settings(saved)
+        return True
+
+    def apply_persisted_settings(self, settings: dict):
+        """Adopt freshly persisted Settings and show them."""
+        self.config_template = dict(settings)
+        self.req_template["port"] = int(
+            self.config_template.get("port") or settingsSvc.DEFAULT_PORT
+        )
+        self.refresh_settings_view()
 
     def webhook_switch_active(self, instance, value):
         """Apply the toggle immediately, instead of waiting for Save.
@@ -665,20 +723,17 @@ class OpenSmsApp(MDApp):
         """
         if self.webhook_switch_guard:
             return
-        enabled = bool(value)
-        _, url, secret = self.read_webhook_inputs()
-        if enabled and not is_valid_target(url):
+        webhook = self.read_webhook_form()
+        if webhook is None:
             self.webhook_switch_guard = True
             instance.active = False
             self.webhook_switch_guard = False
-            self.show_toast_msg(
-                "Add a valid http:// or https:// webhook URL first",
-                is_error=True,
-            )
             return
-        self.save_webhook_config(enabled, url, secret)
+        if not self.persist_settings_form({"webhook": webhook}):
+            self.refresh_webhook_view()
+            return
         self.show_toast_msg(
-            "Webhook enabled" if enabled else "Webhook disabled"
+            "Webhook enabled" if bool(value) else "Webhook disabled"
         )
 
     def validate_webhook(self, enabled: bool, url: str) -> bool:
@@ -705,14 +760,18 @@ class OpenSmsApp(MDApp):
             self.webhook_switch_guard = False
         settings.webhook_url_inp.text = webhook["url"]
         settings.webhook_secret_inp.text = webhook["secret"]
+        self.webhook_enabled_loaded = webhook["enabled"]
+        self.webhook_url_loaded = webhook["url"].strip()
+        self.webhook_secret_loaded = webhook["secret"].strip()
         self.refresh_webhook_status()
 
-    def reload_webhook_config(self):
-        """Pick up the persisted config (e.g. after an external change)."""
-        self.config_template["webhook"] = get_webhook_config(
-            self.app_config
+    def reload_settings_config(self):
+        """Re-read persisted Settings (e.g. after an external change)."""
+        if not self.app_config or not os.path.exists(self.app_config):
+            return
+        self.apply_persisted_settings(
+            settingsSvc.load_settings(self.app_config)
         )
-        self.refresh_webhook_view()
 
     def refresh_webhook_status(self):
         if not self.webhook_status_path:
@@ -754,21 +813,31 @@ class OpenSmsApp(MDApp):
     def refresh_settings_view(self):
         auto_start_sw = self.root.ids.settings_scr.ids.auto_start_sw
         port_no_inp = self.root.ids.settings_scr.ids.port_no_inp
-        if self.config_template["boot"]:
-            auto_start_sw.active = True
-        else:
-            auto_start_sw.active = False
+        self.boot_loaded = bool(self.config_template["boot"])
+        auto_start_sw.active = self.boot_loaded
         port_no_inp.text = str(self.config_template["port"])
+        self.port_loaded = port_no_inp.text.strip()
         self.refresh_webhook_view()
 
     def reset_settings(self, instance=None):
-        self.config_template["port"] = 9292
-        self.config_template["boot"] = False
-        self.config_template["webhook"] = default_webhook_config()
-        self.req_template["port"] = 9292
+        defaults = settingsSvc.default_settings()
+        default_webhook = defaults["webhook"]
+        form = {
+            "port": defaults["port"],
+            "boot": defaults["boot"],
+            "webhook": {
+                "enabled": default_webhook["enabled"],
+                "url": default_webhook["url"],
+                "secret": default_webhook["secret"],
+                "timeout": default_webhook["timeout"],
+                "max_attempts": default_webhook["max_attempts"],
+                "backoff": list(default_webhook["backoff"]),
+                "capacity": default_webhook["capacity"],
+            },
+        }
+        if not self.persist_settings_form(form):
+            return
         print("Settings reset has been done!")
-        self.refresh_settings_view()
-        Thread(target=self.write_app_conf, daemon=True).start()
         Clock.schedule_once(lambda dt: self.show_toast_msg("Settings reset has been done!"))
 
     ## App or UI related things
@@ -850,7 +919,7 @@ class OpenSmsApp(MDApp):
     def on_settings_entry(self, instance=None):
         self.root.ids.top_back_btn.opacity = 1
         self.root.ids.top_back_btn.disabled = False
-        self.reload_webhook_config()
+        self.reload_settings_config()
 
     def back_button_action(self, instance=None):
         if self.root.ids.screen_manager.current in ["Settings", "Logs"]:
