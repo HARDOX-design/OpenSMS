@@ -570,7 +570,11 @@ def _network_status(warnings: list) -> dict:
     """Return the network interface lists, or empty lists on any failure."""
     try:
         provider = _runtime.get("network_ips")
-        network = provider() if provider is not None else netSvc.get_network_ips()
+        network = (
+            provider()
+            if provider is not None
+            else netSvc.get_network_ips(strict=True)
+        )
     except Exception:
         network = None
     if not isinstance(network, dict):
@@ -614,17 +618,31 @@ def _last_delivery(config_dir: str) -> dict | None:
     }
 
 
-def _webhook_status(settings: dict, config_dir: str, warnings: list) -> dict:
-    webhook = settingsSvc.writable_settings(settings)["webhook"]
-    url = webhook["url"]
-    url_host = webhookSvc.target_host(url)
-
+def _webhook_status(
+    settings: dict | None, config_dir: str, warnings: list
+) -> dict:
     pending = _status_runtime("outbox_pending")
-    capacity = webhook["capacity"]
-    if not isinstance(capacity, int) or isinstance(capacity, bool):
-        capacity = None
+    stored_webhook = settings.get("webhook") if settings is not None else None
+    effective_webhook = webhookSvc.normalize_webhook_config(
+        stored_webhook if isinstance(stored_webhook, dict) else None
+    )
+    if settings is None or not isinstance(stored_webhook, dict):
+        enabled = url = secret_set = capacity = None
+        url_host = None
+    else:
+        webhook = settingsSvc.writable_settings(settings)["webhook"]
+        stored_enabled = webhook["enabled"]
+        enabled = stored_enabled if isinstance(stored_enabled, bool) else None
+        url = webhook["url"]
+        url_host = webhookSvc.target_host(url)
+        secret_set = webhook["secret_set"]
+        capacity = webhook["capacity"]
+        if not isinstance(capacity, int) or isinstance(capacity, bool):
+            capacity = None
 
-    if not webhook["enabled"]:
+    # Warnings describe what the dispatcher will do with malformed Settings,
+    # even when the persisted value itself is unknown.
+    if not effective_webhook["enabled"]:
         warnings.append({
             "code": "webhook_disabled",
             "message": (
@@ -632,7 +650,7 @@ def _webhook_status(settings: dict, config_dir: str, warnings: list) -> dict:
                 "discarded."
             ),
         })
-    elif not webhookSvc.is_valid_target(url):
+    elif not webhookSvc.is_valid_target(effective_webhook["url"]):
         warnings.append({
             "code": "webhook_url_invalid",
             "message": (
@@ -663,9 +681,9 @@ def _webhook_status(settings: dict, config_dir: str, warnings: list) -> dict:
         )
 
     return {
-        "enabled": bool(webhook["enabled"]),
+        "enabled": enabled,
         "url_host": url_host,
-        "secret_set": bool(webhook["secret_set"]),
+        "secret_set": secret_set,
         "outbox_pending": pending,
         "outbox_capacity": capacity,
         "last_delivery": last_delivery,
@@ -677,7 +695,10 @@ async def api_status(
     client: dict = Depends(require_scope(SCOPE_SETTINGS))
 ):
     config_dir = get_config_dir()
-    settings = settingsSvc.load_settings(_settings_path())
+    try:
+        settings = settingsSvc.load_settings(_settings_path(), strict=True)
+    except settingsSvc.SettingsLoadError:
+        settings = None
     warnings: list = []
 
     network = _network_status(warnings)
@@ -694,11 +715,15 @@ async def api_status(
             "uptime_s": _status_uptime_s(),
         },
         "service": _service_status(),
-        "config": {
-            "port": settings.get("port"),
-            "boot": settings.get("boot"),
-            "revision": settingsSvc.get_revision(settings),
-        },
+        "config": (
+            {
+                "port": settings.get("port"),
+                "boot": settings.get("boot"),
+                "revision": settingsSvc.get_revision(settings),
+            }
+            if settings is not None
+            else None
+        ),
         "network": network,
         "webhook": webhook,
         "warnings": warnings,
@@ -732,10 +757,11 @@ def _settings_log_message(payload: dict) -> str:
 def _restart_required(settings: dict) -> bool:
     """True only when the saved port differs from a known live bound port."""
     bound_port = get_runtime_provider("bound_port")
-    if bound_port is None:
+    port = settings.get("port")
+    if bound_port is None or port is None:
         return False
     try:
-        return int(settings.get("port")) != int(bound_port)
+        return int(port) != int(bound_port)
     except (TypeError, ValueError):
         return False
 
@@ -924,10 +950,12 @@ def _resolve_webhook_test_config(settings: dict, overrides: dict) -> tuple:
     return url, secret, timeout
 
 
-def _scrub_webhook_target(url: str, error: str) -> str:
+def _scrub_webhook_target(url: object, error: str) -> str:
     """Remove URL parts from an error so credentials never reach the caller."""
     if not error:
         return error
+    if not isinstance(url, str):
+        return "Webhook delivery failed."
     error = webhookSvc.scrub_webhook_error(error)
     candidates: set[str | None] = {url, url.strip()}
     try:

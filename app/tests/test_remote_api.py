@@ -147,6 +147,105 @@ class StatusTests(ApiTestCase):
         self.assertEqual(body["api"]["port"], 9292)
         self.assertEqual(body["api"]["bound_port"], 9292)
 
+    def test_missing_settings_file_reports_the_documented_defaults(self):
+        raw_key = self.add_api_key()
+
+        response = self.status(raw_key)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["config"], {
+            "port": 9292,
+            "boot": False,
+            "revision": 0,
+        })
+        self.assertFalse(body["webhook"]["enabled"])
+        self.assertEqual(body["webhook"]["outbox_capacity"], 100)
+        self.assertIn("webhook_disabled", self.warning_codes(body))
+
+    def test_an_unreadable_existing_settings_file_is_unknown(self):
+        os.mkdir(os.path.join(self.config_dir, "config.json"))
+        raw_key = self.add_api_key()
+
+        response = self.status(raw_key)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIsNone(response.json()["config"])
+        self.assertIn(
+            "webhook_disabled", self.warning_codes(response.json())
+        )
+
+    def test_non_finite_settings_numbers_are_unknown(self):
+        cases = {
+            "overflowing port": '{"port": 1e999, "boot": false}',
+            "infinite revision": '{"revision": Infinity, "boot": false}',
+            "not-a-number capacity": (
+                '{"boot": false, "webhook": {"capacity": NaN}}'
+            ),
+        }
+        raw_key = self.add_api_key()
+        for name, content in cases.items():
+            with self.subTest(name=name):
+                with open(
+                    os.path.join(self.config_dir, "config.json"),
+                    "w",
+                    encoding="utf-8",
+                ) as config_file:
+                    config_file.write(content)
+
+                response = self.status(raw_key)
+
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertIsNone(response.json()["config"])
+
+    def test_corrupt_settings_are_unknown_but_other_status_is_preserved(self):
+        with open(
+            os.path.join(self.config_dir, "config.json"), "w", encoding="utf-8"
+        ) as config_file:
+            config_file.write("not json")
+        self.write_json("resp.json", {"server": "started"})
+        self.write_json("webhook_status.json", {
+            "ok": True,
+            "http_status": 204,
+            "at": "2026-11-26T12:34:56+00:00",
+        })
+        postApi.set_runtime_providers({
+            "network_ips": lambda: {
+                "wifi": [{"interface": "wlan0", "ip": "192.168.1.50"}],
+                "ethernet": [],
+            },
+            "outbox_pending": lambda: 2,
+        })
+        raw_key = self.add_api_key()
+
+        response = self.status(raw_key)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertIsNone(body["config"])
+        self.assertEqual(body["service"]["server"], "started")
+        self.assertEqual(body["network"]["wifi"], [
+            {"interface": "wlan0", "ip": "192.168.1.50"},
+        ])
+        self.assertEqual(body["webhook"], {
+            "enabled": None,
+            "url_host": None,
+            "secret_set": None,
+            "outbox_pending": 2,
+            "outbox_capacity": None,
+            "last_delivery": {
+                "ok": True,
+                "event": None,
+                "delivery_id": None,
+                "http_status": 204,
+                "attempts": None,
+                "error": None,
+                "at": "2026-11-26T12:34:56+00:00",
+            },
+        })
+        self.assertIn("webhook_disabled", self.warning_codes(body))
+        self.assertNotIn("webhook_url_invalid", self.warning_codes(body))
+
     def test_missing_runtime_values_are_null_not_invented(self):
         postApi.set_runtime_providers({})
         raw_key = self.add_api_key()
@@ -218,6 +317,28 @@ class StatusTests(ApiTestCase):
         body = response.json()
         self.assertEqual(body["network"], {"wifi": [], "ethernet": []})
         self.assertIn("network_unavailable", self.warning_codes(body))
+
+    def test_default_network_discovery_failure_is_distinguishable(self):
+        raw_key = self.add_api_key()
+
+        with mock.patch.object(
+            postApi.netSvc,
+            "get_desktop_lan_ips",
+            side_effect=OSError("network discovery failed"),
+        ):
+            response = self.status(raw_key)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["network"], {"wifi": [], "ethernet": []})
+        self.assertIn("network_unavailable", self.warning_codes(body))
+
+        postApi.set_runtime_providers({
+            "network_ips": lambda: {"wifi": [], "ethernet": []},
+        })
+        body = self.status(raw_key).json()
+        self.assertEqual(body["network"], {"wifi": [], "ethernet": []})
+        self.assertNotIn("network_unavailable", self.warning_codes(body))
 
     def test_status_reports_the_last_delivery_attempt_and_outbox_depth(self):
         self.write_config(self.config(
@@ -350,6 +471,130 @@ class StatusTests(ApiTestCase):
 
         self.assertIn("webhook_url_invalid", self.warning_codes(body))
         self.assertNotIn("webhook_disabled", self.warning_codes(body))
+
+    def test_a_malformed_webhook_object_is_unknown_but_warns_if_disabled(self):
+        raw_key = self.add_api_key()
+        for webhook in ([], "broken", None, 42):
+            with self.subTest(webhook=webhook):
+                config = self.config()
+                config["webhook"] = webhook
+                self.write_config(config)
+                postApi.set_runtime_providers({"outbox_pending": lambda: 2})
+
+                response = self.status(raw_key)
+
+                self.assertEqual(response.status_code, 200, response.text)
+                body = response.json()
+                self.assertEqual(body["config"], {
+                    "port": 9393,
+                    "boot": True,
+                    "revision": 5,
+                })
+                self.assertEqual(body["webhook"], {
+                    "enabled": None,
+                    "url_host": None,
+                    "secret_set": None,
+                    "outbox_pending": 2,
+                    "outbox_capacity": None,
+                    "last_delivery": None,
+                })
+                self.assertIn(
+                    "webhook_disabled", self.warning_codes(body)
+                )
+                self.assertNotIn(
+                    "webhook_url_invalid", self.warning_codes(body)
+                )
+
+    def test_a_malformed_enabled_state_is_unknown_but_warns_effectively(self):
+        valid_url = "https://proxy.example.lan/hooks/opensms"
+        cases = (
+            ("true", valid_url, None),
+            (1, valid_url, None),
+            ([], valid_url, "webhook_disabled"),
+            ({}, valid_url, "webhook_disabled"),
+            ("true", "not-a-url", "webhook_url_invalid"),
+            (1, 42, "webhook_url_invalid"),
+        )
+        raw_key = self.add_api_key()
+        for enabled, url, expected_warning in cases:
+            with self.subTest(enabled=enabled, url=url):
+                self.write_config(self.config(webhook={
+                    "enabled": enabled,
+                    "url": url,
+                }))
+
+                response = self.status(raw_key)
+
+                self.assertEqual(response.status_code, 200, response.text)
+                body = response.json()
+                self.assertIsNone(body["webhook"]["enabled"])
+                self.assertEqual(
+                    body["webhook"]["url_host"],
+                    "proxy.example.lan" if url == valid_url else None,
+                )
+                if expected_warning is None:
+                    self.assertNotIn(
+                        "webhook_disabled", self.warning_codes(body)
+                    )
+                    self.assertNotIn(
+                        "webhook_url_invalid", self.warning_codes(body)
+                    )
+                else:
+                    self.assertIn(
+                        expected_warning, self.warning_codes(body)
+                    )
+                    other_warning = (
+                        "webhook_url_invalid"
+                        if expected_warning == "webhook_disabled"
+                        else "webhook_disabled"
+                    )
+                    self.assertNotIn(
+                        other_warning, self.warning_codes(body)
+                    )
+
+    def test_a_malformed_stored_target_type_is_safe_and_warns(self):
+        cases = {
+            "number": 42,
+            "list": ["https://MALFORMED-TARGET.example.lan/hook"],
+            "object": {"target": "MALFORMED-TARGET"},
+            "null": None,
+            "malformed authority": "http://proxy-user:proxy-pass@[invalid",
+        }
+        raw_key = self.add_api_key()
+        for name, url in cases.items():
+            with self.subTest(name=name):
+                self.write_config(self.config(
+                    webhook={"enabled": True, "url": url},
+                ))
+                self.write_json("webhook_status.json", {
+                    "ok": False,
+                    "error": f"Could not deliver to {url}",
+                })
+
+                response = self.status(raw_key)
+
+                self.assertEqual(response.status_code, 200, response.text)
+                body = response.json()
+                self.assertIsNone(body["webhook"]["url_host"])
+                if not isinstance(url, str):
+                    self.assertEqual(
+                        body["webhook"]["last_delivery"]["error"],
+                        "Webhook delivery failed.",
+                    )
+                self.assertIn(
+                    "webhook_url_invalid", self.warning_codes(body)
+                )
+                self.assertNotIn(
+                    "webhook_disabled", self.warning_codes(body)
+                )
+                for sensitive in (
+                    "MALFORMED-TARGET",
+                    "old-user",
+                    "old-password",
+                    "proxy-user",
+                    "proxy-pass",
+                ):
+                    self.assertNotIn(sensitive, response.text)
 
     def test_an_outbox_near_capacity_is_a_warning(self):
         self.write_config(self.config(

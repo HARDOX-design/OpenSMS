@@ -6,6 +6,7 @@ holds only a process-local write lock, never Settings themselves.
 """
 
 import json
+import math
 import os
 import tempfile
 import threading
@@ -71,6 +72,10 @@ class SettingsRevisionConflict(Exception):
         )
         super().__init__(self.detail)
 
+
+class SettingsLoadError(ValueError):
+    """Existing Settings could not be read as a JSON object."""
+
 ## Defaults
 
 def default_webhook_settings() -> dict:
@@ -96,19 +101,47 @@ def default_settings() -> dict:
 
 ## Load
 
-def load_settings(config_path: str) -> dict:
+def _reject_non_finite_json_number(value: str) -> None:
+    raise ValueError(f"Non-finite JSON number: {value}")
+
+
+def _finite_json_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"Non-finite JSON number: {value}")
+    return number
+
+
+def load_settings(config_path: str, *, strict: bool = False) -> dict:
     """Load Settings, filling missing fields from the defaults.
 
     Unknown fields, at the top level and inside the Webhook object, are kept so
-    a later write can preserve them.
+    a later write can preserve them. A missing file always means defaults. With
+    ``strict=True``, an existing file that cannot be read as a JSON object raises
+    ``SettingsLoadError`` so callers can report unknown instead of live defaults.
+    A malformed stored Webhook container is preserved in strict mode so callers
+    can distinguish it from a legacy object whose missing fields use defaults.
     """
     settings = default_settings()
     try:
         with open(config_path, "r", encoding="utf-8") as config_file:
-            raw = json.load(config_file)
-    except Exception:
+            if strict:
+                raw = json.load(
+                    config_file,
+                    parse_float=_finite_json_float,
+                    parse_constant=_reject_non_finite_json_number,
+                )
+            else:
+                raw = json.load(config_file)
+    except FileNotFoundError:
+        return settings
+    except Exception as exc:
+        if strict:
+            raise SettingsLoadError("Existing Settings could not be read") from exc
         return settings
     if not isinstance(raw, dict):
+        if strict:
+            raise SettingsLoadError("Existing Settings must be a JSON object")
         return settings
     for key, value in raw.items():
         if key == "webhook":
@@ -117,6 +150,8 @@ def load_settings(config_path: str) -> dict:
     raw_webhook = raw.get("webhook")
     if isinstance(raw_webhook, dict):
         settings["webhook"].update(raw_webhook)
+    elif strict and "webhook" in raw:
+        settings["webhook"] = raw_webhook
     return settings
 
 def get_revision(settings: dict) -> int:
