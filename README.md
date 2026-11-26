@@ -132,6 +132,70 @@ curl -i -X POST 'http://127.0.0.1:9292/sms/' \
     -d '{"number": "+1234567890", "text": "Hello from OpenSMS API!"}'
 ```
 
+### 🔐 Remote Settings and control API
+
+The API server can also read and change Settings, manage API keys, test the Webhook, and restart the server. This is meant for a proxy or automation on the **same LAN or VPN** as the phone. The API uses bearer keys over plain HTTP, with no TLS or CORS, so never expose the port to the internet; use a VPN or an authenticated tunnel for remote access.
+
+Every `/api/` route, including `GET /api/health`, requires an API key with the `settings:write` Scope. `POST /sms/` requires `sms:write`.
+
+| Scope | Allows |
+| --- | --- |
+| `sms:write` | `POST /sms/` |
+| `settings:write` | every `/api/` route: health, status, Settings, key management, Webhook test, Restart |
+
+The first API key is generated from the phone UI when the server starts. Create a separate key for each integration; the raw key is returned only once. Set it once in your shell:
+
+```bash
+export OSMS_KEY='osms_…'
+
+curl -sS -X POST 'http://192.168.1.50:9292/api/keys' \
+  -H "Authorization: Bearer $OSMS_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "sms-proxy", "scopes": ["sms:write"]}'
+```
+
+`GET /api/keys` lists keys without hashes, and `DELETE /api/keys/{id}` revokes one immediately. The last remaining key cannot be deleted.
+
+Check the phone and read Settings:
+
+```bash
+curl -sS -H "Authorization: Bearer $OSMS_KEY" \
+  'http://192.168.1.50:9292/api/health'
+
+curl -sS -H "Authorization: Bearer $OSMS_KEY" \
+  'http://192.168.1.50:9292/api/settings'
+```
+
+`PUT /api/settings` replaces the full writable subset, so send every field you want to keep. Include the `revision` from `GET` for optimistic concurrency; a stale Revision returns `409`.
+
+```bash
+curl -sS -X PUT 'http://192.168.1.50:9292/api/settings' \
+  -H "Authorization: Bearer $OSMS_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "revision": 7,
+    "port": 9292,
+    "boot": true,
+    "webhook": {
+      "enabled": true,
+      "url": "https://proxy.example.lan/hooks/opensms",
+      "timeout": 10,
+      "max_attempts": 3,
+      "backoff": [5, 30],
+      "capacity": 100
+    }
+  }'
+```
+
+Omit `webhook.secret` to keep the stored secret, send `""` to clear it, or send a new string to replace it. Webhook and retry changes take effect immediately. A port change is two-step: the response sets `restart_required`, then call:
+
+```bash
+curl -sS -X POST 'http://192.168.1.50:9292/api/server/restart' \
+  -H "Authorization: Bearer $OSMS_KEY"
+```
+
+`GET /api/status` reports the bound and configured port, network addresses, Outbox depth, the last Delivery attempt, and warnings (for example when forwarding is disabled or the Outbox is near capacity). `POST /api/webhook/test` tests a Webhook target without saving it. The full contract, error codes, and persisted schema are in [docs/remote-api.md](./docs/remote-api.md).
+
 ## 📥 Receiving SMS (Android)
 
 OpenSMS can forward every SMS received by the phone to your own HTTP endpoint as a webhook. Receiving works independently of the API server: it runs in the same background service, so the API can be stopped while webhooks keep flowing.
@@ -153,7 +217,7 @@ Every Inbound SMS produces one `POST` with a JSON body:
 ```http
 POST /your-hook HTTP/1.1
 Content-Type: application/json
-User-Agent: OpenSMS/1.1.0
+User-Agent: OpenSMS/1.2.0
 X-OpenSMS-Event: sms.received
 X-OpenSMS-Delivery: 6f1c2f5e-0d7a-4c55-9f0e-2b1c8b7f0a11
 X-OpenSMS-Signature: sha256=...
