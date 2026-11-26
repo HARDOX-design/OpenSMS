@@ -291,6 +291,8 @@ def validate_merged_settings(settings: dict):
     webhook = settings.get("webhook")
     if not isinstance(webhook, dict):
         raise SettingsValidationError("webhook must be an object")
+    if not isinstance(settings.get("permissions", False), bool):
+        raise SettingsValidationError("permissions must be a boolean")
     if not isinstance(webhook.get("secret", ""), str):
         raise SettingsValidationError("webhook.secret must be a string")
     validate_settings_payload({
@@ -397,7 +399,10 @@ def merge_local_settings(current: dict, form: dict) -> dict:
 
 
 def _store_writable(
-    config_path: str, writable: dict, expected_revision: int | None
+    config_path: str,
+    writable: dict,
+    expected_revision: int | None,
+    permissions: bool | None = None,
 ) -> dict:
     """Validate and persist a normalized writable subset.
 
@@ -416,6 +421,8 @@ def _store_writable(
         )
     validate_business_rules(writable)
     merged = apply_writable_settings(current, writable)
+    if permissions is not None:
+        merged["permissions"] = permissions
     validate_merged_settings(merged)
     merged["revision"] = get_revision(current) + 1
     atomic_write_json(config_path, merged)
@@ -438,19 +445,31 @@ def save_settings(config_path: str, payload, expected_revision: int | None = Non
 def save_local_settings(
     config_path: str, form: dict, expected_revision: int | None = None
 ) -> dict:
-    """Save the on-device form's fields over a fresh read of Settings.
+    """Save on-device fields over a fresh read of Settings.
 
     `form` carries only the fields the screen owns (port, boot, and some
-    Webhook fields). Everything else keeps its freshly read value, so a remote
-    change is not undone and the Revision is bumped rather than reset.
-    Validation is the same one the API uses.
+    Webhook fields), plus internal fields owned by the permission flow.
+    Everything else keeps its freshly read value, so a remote change is not
+    undone and the Revision is bumped rather than reset. Validation is the
+    same one the API uses.
     """
+    permissions = None
+    if isinstance(form, dict) and "permissions" in form:
+        permissions = form["permissions"]
+        if not isinstance(permissions, bool):
+            raise SettingsValidationError("permissions must be a boolean")
+        form = {
+            field: value for field, value in form.items()
+            if field != "permissions"
+        }
     with _write_lock:
         current = load_settings(config_path)
         writable = validate_settings_payload(
             merge_local_settings(current, form)
         )
-        return _store_writable(config_path, writable, expected_revision)
+        return _store_writable(
+            config_path, writable, expected_revision, permissions
+        )
 
 
 def atomic_write_json(path: str, data):

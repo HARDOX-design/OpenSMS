@@ -202,6 +202,46 @@ class LocalSaveMergeTests(LocalSaveTestCase):
         self.assertEqual(saved["webhook"]["capacity"], 100)
 
 
+class PermissionConfirmationSaveTests(LocalSaveTestCase):
+    def test_permission_confirmation_preserves_a_remote_write_after_a_stale_read(self):
+        stored_settings = self.stored_config()
+        stored_settings["permissions"] = False
+        self.write_config(stored_settings)
+        stale = settingsSvc.load_settings(self.config_path)
+        remote = settingsSvc.writable_settings(stale)
+        remote["revision"] = stale["revision"]
+        remote["webhook"].pop("secret_set")
+        remote["webhook"].update({
+            "url": "https://remote-after-open.example.lan/hooks/opensms",
+            "secret": "remote-after-open-secret",
+            "timeout": 11,
+            "max_attempts": 6,
+            "backoff": [2, 4, 8],
+            "capacity": 300,
+        })
+        settingsSvc.save_settings(self.config_path, remote)
+
+        saved = settingsSvc.save_local_settings(
+            self.config_path, {"permissions": True}
+        )
+
+        self.assertEqual(saved["revision"], 5)
+        self.assertEqual(saved["permissions"], True)
+        webhook = saved["webhook"]
+        self.assertEqual(
+            webhook["url"], "https://remote-after-open.example.lan/hooks/opensms"
+        )
+        self.assertEqual(webhook["secret"], "remote-after-open-secret")
+        self.assertEqual(webhook["timeout"], 11)
+        self.assertEqual(webhook["max_attempts"], 6)
+        self.assertEqual(webhook["backoff"], [2, 4, 8])
+        self.assertEqual(webhook["capacity"], 300)
+        self.assertEqual(saved["unknown_top_level"], "internal")
+        self.assertEqual(webhook["unknown_webhook"], "internal")
+        self.assertEqual(self.read_config(), saved)
+        self.assertEqual(self.tmp_files(), [])
+
+
 class LocalSaveValidationTests(LocalSaveTestCase):
 
     def assert_rejected(self, form: dict, error_class):
@@ -212,6 +252,11 @@ class LocalSaveValidationTests(LocalSaveTestCase):
 
         self.assertEqual(self.read_config(), before)
         self.assertEqual(self.tmp_files(), [])
+
+    def test_a_non_boolean_permission_rejects_the_whole_save(self):
+        self.assert_rejected(
+            {"permissions": "true"}, settingsSvc.SettingsValidationError
+        )
 
     def test_an_out_of_range_port_rejects_the_whole_save(self):
         for port in (

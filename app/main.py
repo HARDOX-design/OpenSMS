@@ -490,8 +490,16 @@ class OpenSmsApp(MDApp):
         )
 
     def confirm_android_permissions(self, instnce=None):
-        self.config_template["permissions"] = True
-        Thread(target=self.write_app_conf, daemon=True).start()
+        Thread(target=self.persist_android_permissions, daemon=True).start()
+
+    def persist_android_permissions(self):
+        """Persist only the permission flag over freshly read Settings."""
+        saved = self.persist_local_settings({"permissions": True})
+        if saved is None:
+            return
+        Clock.schedule_once(
+            lambda dt, settings=saved: self.apply_persisted_settings(settings)
+        )
 
     def open_android_settings(self, instance=None):
         self.txt_dialog_closer()
@@ -697,13 +705,21 @@ class OpenSmsApp(MDApp):
 
     def persist_settings_form(self, form):
         """Merge the form over fresh Settings and persist it atomically."""
-        try:
-            saved = settingsSvc.save_local_settings(self.app_config, form)
-        except settingsSvc.SettingsValidationError as exc:
-            self.show_toast_msg(str(exc), is_error=True)
+        saved = self.persist_local_settings(form)
+        if saved is None:
             return False
         self.apply_persisted_settings(saved)
         return True
+
+    def persist_local_settings(self, form):
+        """Save local fields, reporting validation errors on Kivy's thread."""
+        try:
+            return settingsSvc.save_local_settings(self.app_config, form)
+        except settingsSvc.SettingsValidationError as exc:
+            Clock.schedule_once(
+                lambda dt: self.show_toast_msg(str(exc), is_error=True)
+            )
+            return None
 
     def apply_persisted_settings(self, settings: dict):
         """Adopt freshly persisted Settings and show them."""
