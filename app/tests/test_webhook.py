@@ -10,6 +10,7 @@ import time
 import unittest
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -28,6 +29,8 @@ class MockTarget:
                 "headers": {k.lower(): v for k, v in self.headers.items()},
                 "body": body,
             })
+            if self.server.delay:
+                time.sleep(self.server.delay)
             status = self.server.statuses.get_nowait() \
                 if not self.server.statuses.empty() else 200
             if status in (301, 302, 303, 307, 308):
@@ -48,6 +51,7 @@ class MockTarget:
         self.server.requests = queue.Queue()
         self.server.statuses = queue.Queue()
         self.server.count = 0
+        self.server.delay = 0
         self.server.redirect_location = None
         self.thread = threading.Thread(
             target=self.server.serve_forever, daemon=True
@@ -68,6 +72,9 @@ class MockTarget:
 
     def redirect_to(self, url):
         self.server.redirect_location = url
+
+    def set_delay(self, seconds):
+        self.server.delay = seconds
 
     def next_request(self, timeout=5):
         return self.server.requests.get(timeout=timeout)
@@ -106,17 +113,32 @@ class WebhookSvcTests(unittest.TestCase):
         self.target.close()
         self.tmp.cleanup()
 
-    def write_config(self, enabled=True, url=None, secret=""):
+    def write_config(self, enabled=True, url=None, secret="", **retry):
+        webhook = {
+            "enabled": enabled,
+            "url": url if url is not None else self.target.url,
+            "secret": secret,
+        }
+        webhook.update(retry)
         with open(self.config_path, "w", encoding="utf-8") as cf:
             json.dump({
                 "port": 9292,
                 "boot": False,
-                "webhook": {
-                    "enabled": enabled,
-                    "url": url if url is not None else self.target.url,
-                    "secret": secret,
-                },
+                "webhook": webhook,
             }, cf)
+
+    def write_live_webhook(self, **overrides):
+        webhook = {
+            "enabled": True,
+            "url": self.target.url,
+            "secret": "",
+            "timeout": webhookSvc.DEFAULT_TIMEOUT,
+            "max_attempts": webhookSvc.DEFAULT_MAX_ATTEMPTS,
+            "backoff": list(webhookSvc.DEFAULT_BACKOFF),
+            "capacity": webhookSvc.DEFAULT_CAPACITY,
+        }
+        webhook.update(overrides)
+        self.write_config(**webhook)
 
     def make_dispatcher(self, **kwargs):
         kwargs.setdefault("backoff", (0.01, 0.01))
@@ -364,6 +386,151 @@ class WebhookSvcTests(unittest.TestCase):
         blocking.enqueue(webhookSvc.build_inbound_payload({"from": "c", "text": "3"}))
         self.assertEqual(blocking.pending_count(), 2)
         blocking.release.set()
+
+    ## Live Settings
+
+    def test_missing_retry_settings_use_constants(self):
+        self.write_config(enabled=True)
+        config = webhookSvc.get_webhook_config(self.config_path)
+        self.assertEqual(config["timeout"], webhookSvc.DEFAULT_TIMEOUT)
+        self.assertEqual(
+            config["max_attempts"], webhookSvc.DEFAULT_MAX_ATTEMPTS
+        )
+        self.assertEqual(config["backoff"], list(webhookSvc.DEFAULT_BACKOFF))
+        self.assertEqual(config["capacity"], webhookSvc.DEFAULT_CAPACITY)
+
+    def test_invalid_retry_settings_fall_back_to_constants(self):
+        config = webhookSvc.normalize_webhook_config({
+            "enabled": True,
+            "url": self.target.url,
+            "timeout": 0,
+            "max_attempts": "many",
+            "backoff": [0, -1],
+            "capacity": 99999,
+        })
+        self.assertEqual(config["timeout"], webhookSvc.DEFAULT_TIMEOUT)
+        self.assertEqual(
+            config["max_attempts"], webhookSvc.DEFAULT_MAX_ATTEMPTS
+        )
+        self.assertEqual(config["backoff"], list(webhookSvc.DEFAULT_BACKOFF))
+        self.assertEqual(config["capacity"], webhookSvc.DEFAULT_CAPACITY)
+
+    def test_malformed_settings_never_crash_the_dispatcher(self):
+        with open(self.config_path, "w", encoding="utf-8") as cf:
+            cf.write("{not json")
+        dispatcher = self.make_dispatcher()
+        self.assertFalse(dispatcher.enqueue(webhookSvc.build_inbound_payload({
+            "from": "x", "text": "y",
+        })))
+        self.assertEqual(dispatcher.pending_count(), 0)
+
+    def test_malformed_settings_do_not_crash_a_queued_delivery(self):
+        payload = webhookSvc.build_inbound_payload({"from": "x", "text": "y"})
+        with open(self.outbox_path, "w", encoding="utf-8") as of:
+            json.dump([{
+                "delivery_id": payload["delivery_id"],
+                "event": payload["event"],
+                "url": self.target.url,
+                "payload": payload,
+                "attempts": 0,
+            }], of)
+        with open(self.config_path, "w", encoding="utf-8") as cf:
+            cf.write("{not json")
+        dispatcher = self.make_dispatcher()
+        self.assertTrue(wait_for(lambda: dispatcher.pending_count() == 0))
+        status = self.wait_for_status()
+        self.assertFalse(status["ok"])
+        self.assertEqual(status["error"], "webhook disabled")
+
+    def test_live_timeout_is_read_per_attempt(self):
+        dispatcher = self.make_dispatcher(timeout=None)
+        self.write_live_webhook(timeout=1, max_attempts=1)
+        self.target.set_delay(2)
+        started = time.time()
+        dispatcher.enqueue(webhookSvc.build_inbound_payload({
+            "from": "x", "text": "y",
+        }))
+        status = self.wait_for_status(timeout=5)
+        elapsed = time.time() - started
+        self.assertFalse(status["ok"])
+        self.assertEqual(status["attempts"], 1)
+        self.assertLess(elapsed, 1.8)
+
+    def test_live_max_attempts_changes_without_restart(self):
+        dispatcher = self.make_dispatcher()
+        self.write_live_webhook(max_attempts=1)
+        self.target.queue_statuses(500)
+        dispatcher.enqueue(webhookSvc.build_inbound_payload({
+            "from": "x", "text": "y",
+        }))
+        status = self.wait_for_status()
+        self.assertFalse(status["ok"])
+        self.assertEqual(status["attempts"], 1)
+        self.assertEqual(self.target.count, 1)
+
+    def test_live_backoff_is_read_per_attempt(self):
+        dispatcher = self.make_dispatcher(backoff=None)
+        self.write_live_webhook(max_attempts=2, backoff=[7])
+        self.target.queue_statuses(500)
+        waits = []
+
+        def fake_wait(event, timeout=None):
+            waits.append(timeout)
+            return False
+
+        with mock.patch.object(threading.Event, "wait", fake_wait):
+            dispatcher.enqueue(webhookSvc.build_inbound_payload({
+                "from": "x", "text": "y",
+            }))
+            status = self.wait_for_status()
+
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["attempts"], 2)
+        self.assertEqual([wait for wait in waits if wait is not None], [7])
+
+    def test_live_capacity_drops_oldest(self):
+        class BlockingDispatcher(webhookSvc.WebhookDispatcher):
+            def __init__(self, *args, **kwargs):
+                self.release = threading.Event()
+                super().__init__(*args, **kwargs)
+
+            def _deliver(self, record):
+                self.release.wait(5)
+                return True, 200, None, False
+
+        dispatcher = BlockingDispatcher(
+            config_path=self.config_path,
+            outbox_path=self.outbox_path,
+            status_path=self.status_path,
+            log=lambda message: None,
+        )
+        self.dispatchers.append(dispatcher)
+        self.write_live_webhook(capacity=10)
+        first = webhookSvc.build_inbound_payload({"from": "a", "text": "1"})
+        dispatcher.enqueue(first)
+        self.assertTrue(wait_for(lambda: dispatcher.pending_count() == 1))
+        for index in range(2, 12):
+            dispatcher.enqueue(webhookSvc.build_inbound_payload({
+                "from": "x", "text": str(index),
+            }))
+        self.assertEqual(dispatcher.pending_count(), 10)
+        with open(self.outbox_path, encoding="utf-8") as of:
+            records = json.load(of)
+        delivery_ids = [record["delivery_id"] for record in records]
+        self.assertEqual(len(delivery_ids), 10)
+        self.assertNotIn(first["delivery_id"], delivery_ids)
+        dispatcher.release.set()
+
+    def test_explicit_max_attempts_wins_over_live_settings(self):
+        dispatcher = self.make_dispatcher(max_attempts=1)
+        self.write_live_webhook(max_attempts=5)
+        self.target.queue_statuses(500)
+        dispatcher.enqueue(webhookSvc.build_inbound_payload({
+            "from": "x", "text": "y",
+        }))
+        status = self.wait_for_status()
+        self.assertEqual(status["attempts"], 1)
+        self.assertEqual(self.target.count, 1)
 
     ## Inbox spool
 

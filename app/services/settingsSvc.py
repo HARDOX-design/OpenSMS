@@ -12,28 +12,30 @@ import threading
 
 from services.config import app_name
 from services.webhookSvc import (
+    BACKOFF_MAX_COUNT,
+    BACKOFF_MAX_SECONDS,
+    BACKOFF_MIN_COUNT,
+    CAPACITY_MAX,
+    CAPACITY_MIN,
     DEFAULT_BACKOFF,
     DEFAULT_CAPACITY,
     DEFAULT_MAX_ATTEMPTS,
     DEFAULT_TIMEOUT,
+    MAX_ATTEMPTS_MAX,
+    MAX_ATTEMPTS_MIN,
+    TIMEOUT_MAX,
+    TIMEOUT_MIN,
     is_valid_target,
+    normalize_webhook_config,
 )
 
 DEFAULT_PORT = 9292
 DEFAULT_BOOT = False
 
-# Ranges from the API contract in docs/remote-api.md.
+# Port range from the API contract in docs/remote-api.md. The Webhook retry
+# ranges live with the delivery defaults in webhookSvc.
 PORT_MIN = 1025
 PORT_MAX = 65535
-TIMEOUT_MIN = 1
-TIMEOUT_MAX = 60
-MAX_ATTEMPTS_MIN = 1
-MAX_ATTEMPTS_MAX = 50
-BACKOFF_MIN_COUNT = 1
-BACKOFF_MAX_COUNT = 8
-BACKOFF_MAX_SECONDS = 3600
-CAPACITY_MIN = 10
-CAPACITY_MAX = 5000
 SECRET_MAX_LENGTH = 256
 
 TOP_LEVEL_FIELDS = {"port", "boot", "webhook", "revision"}
@@ -300,13 +302,15 @@ def validate_merged_settings(settings: dict):
 ## API shape
 
 def writable_settings(settings: dict) -> dict:
-    """Return only the writable subset, with the secret masked."""
+    """Return only the writable subset, with the secret masked.
+
+    Retry values are normalized the same way the dispatcher reads them, so an
+    invalid value stored by hand is reported as the constant actually in use.
+    """
     webhook = settings.get("webhook")
     if not isinstance(webhook, dict):
         webhook = {}
-    backoff = webhook.get("backoff")
-    if not isinstance(backoff, list):
-        backoff = list(DEFAULT_BACKOFF)
+    retry = normalize_webhook_config(webhook)
     return {
         "port": settings.get("port", DEFAULT_PORT),
         "boot": settings.get("boot", DEFAULT_BOOT),
@@ -314,10 +318,10 @@ def writable_settings(settings: dict) -> dict:
             "enabled": webhook.get("enabled", False),
             "url": webhook.get("url", ""),
             "secret_set": bool(webhook.get("secret")),
-            "timeout": webhook.get("timeout", DEFAULT_TIMEOUT),
-            "max_attempts": webhook.get("max_attempts", DEFAULT_MAX_ATTEMPTS),
-            "backoff": list(backoff),
-            "capacity": webhook.get("capacity", DEFAULT_CAPACITY),
+            "timeout": retry["timeout"],
+            "max_attempts": retry["max_attempts"],
+            "backoff": list(retry["backoff"]),
+            "capacity": retry["capacity"],
         },
     }
 

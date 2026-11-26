@@ -30,6 +30,17 @@ DEFAULT_BACKOFF = (5, 30)
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_CAPACITY = 100
 
+# Live Settings ranges, shared with the API validator in settingsSvc.
+TIMEOUT_MIN = 1
+TIMEOUT_MAX = 60
+MAX_ATTEMPTS_MIN = 1
+MAX_ATTEMPTS_MAX = 50
+BACKOFF_MIN_COUNT = 1
+BACKOFF_MAX_COUNT = 8
+BACKOFF_MAX_SECONDS = 3600
+CAPACITY_MIN = 10
+CAPACITY_MAX = 5000
+
 ## Config
 
 def default_webhook_config() -> dict:
@@ -37,14 +48,63 @@ def default_webhook_config() -> dict:
         "enabled": False,
         "url": "",
         "secret": "",
+        "timeout": DEFAULT_TIMEOUT,
+        "max_attempts": DEFAULT_MAX_ATTEMPTS,
+        "backoff": list(DEFAULT_BACKOFF),
+        "capacity": DEFAULT_CAPACITY,
     }
 
+def _int_setting(value, default: int, low: int, high: int) -> int:
+    """Return `value` when it is an in-range JSON integer, else `default`."""
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and low <= value <= high
+    ):
+        return value
+    return default
+
+def _backoff_setting(value) -> list:
+    if not isinstance(value, list) or not (
+        BACKOFF_MIN_COUNT <= len(value) <= BACKOFF_MAX_COUNT
+    ):
+        return list(DEFAULT_BACKOFF)
+    normalized = []
+    for wait_for in value:
+        if (
+            not isinstance(wait_for, int)
+            or isinstance(wait_for, bool)
+            or wait_for < 1
+            or wait_for > BACKOFF_MAX_SECONDS
+        ):
+            return list(DEFAULT_BACKOFF)
+        normalized.append(wait_for)
+    return normalized
+
 def normalize_webhook_config(raw: dict | None) -> dict:
+    """Normalize the Webhook object, falling back to today's constants.
+
+    A missing or invalid retry value must never crash the dispatcher; the
+    value simply behaves as the constant it replaced.
+    """
     config = default_webhook_config()
     if isinstance(raw, dict):
         config["enabled"] = bool(raw.get("enabled", False))
         config["url"] = str(raw.get("url") or "").strip()
         config["secret"] = str(raw.get("secret") or "")
+        config["timeout"] = _int_setting(
+            raw.get("timeout"), DEFAULT_TIMEOUT, TIMEOUT_MIN, TIMEOUT_MAX
+        )
+        config["max_attempts"] = _int_setting(
+            raw.get("max_attempts"),
+            DEFAULT_MAX_ATTEMPTS,
+            MAX_ATTEMPTS_MIN,
+            MAX_ATTEMPTS_MAX,
+        )
+        config["backoff"] = _backoff_setting(raw.get("backoff"))
+        config["capacity"] = _int_setting(
+            raw.get("capacity"), DEFAULT_CAPACITY, CAPACITY_MIN, CAPACITY_MAX
+        )
     return config
 
 def get_webhook_config(config_path: str) -> dict:
@@ -261,18 +321,26 @@ class WebhookDispatcher:
         outbox_path: str,
         status_path: str,
         log=None,
-        timeout: float = DEFAULT_TIMEOUT,
-        backoff: tuple = DEFAULT_BACKOFF,
-        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-        capacity: int = DEFAULT_CAPACITY,
+        timeout: float | None = None,
+        backoff: tuple | None = None,
+        max_attempts: int | None = None,
+        capacity: int | None = None,
     ):
+        # `None` means "read the live Settings value on each use"; an explicit
+        # value is a test override and always wins, as it did before.
         self.config_path = config_path
         self.outbox_path = outbox_path
         self.status_path = status_path
-        self.timeout = timeout
-        self.backoff = tuple(backoff)
-        self.max_attempts = max(1, int(max_attempts))
-        self.capacity = max(1, int(capacity))
+        self._timeout_override = timeout
+        self._backoff_override = (
+            tuple(backoff) if backoff is not None else None
+        )
+        self._max_attempts_override = (
+            max(1, int(max_attempts)) if max_attempts is not None else None
+        )
+        self._capacity_override = (
+            max(1, int(capacity)) if capacity is not None else None
+        )
         self.log = log or (lambda message: None)
         self._queue = queue.Queue()
         self._lock = threading.Lock()
@@ -285,6 +353,31 @@ class WebhookDispatcher:
             daemon=True,
         )
         self._thread.start()
+
+    ## Live Settings
+
+    @staticmethod
+    def _resolved(override, live_value):
+        """An explicit constructor override always wins over live Settings."""
+        return live_value if override is None else override
+
+    def _timeout_for(self, config: dict) -> float:
+        return self._resolved(self._timeout_override, config["timeout"])
+
+    def _backoff_for(self, config: dict) -> tuple:
+        return self._resolved(
+            self._backoff_override, tuple(config["backoff"])
+        )
+
+    def _max_attempts_for(self, config: dict) -> int:
+        return self._resolved(
+            self._max_attempts_override, config["max_attempts"]
+        )
+
+    def _capacity_for(self, config: dict) -> int:
+        return self._resolved(
+            self._capacity_override, config["capacity"]
+        )
 
     ## Outbox
 
@@ -327,7 +420,8 @@ class WebhookDispatcher:
             "attempts": 0,
         }
         with self._lock:
-            while len(self._outbox) >= self.capacity:
+            capacity = self._capacity_for(config)
+            while len(self._outbox) >= capacity:
                 dropped_id, dropped = self._outbox.popitem(last=False)
                 self.log(
                     f"Webhook outbox full, dropped {dropped.get('event')} "
@@ -387,32 +481,37 @@ class WebhookDispatcher:
         """Attempt delivery. Returns (ok, status, error, interrupted)."""
         status = None
         error = None
-        attempts_done = int(record.get("attempts") or 0)
-        if attempts_done >= self.max_attempts:
-            return False, None, "retry limit reached", False
-        for attempt in range(attempts_done + 1, self.max_attempts + 1):
+        attempt = int(record.get("attempts") or 0) + 1
+        while True:
             if self._stop.is_set():
                 return False, status, "dispatcher stopped", True
             config = get_webhook_config(self.config_path)
             if not config["enabled"]:
                 return False, status, "webhook disabled", False
+            max_attempts = self._max_attempts_for(config)
+            if attempt > max_attempts:
+                return False, status, "retry limit reached", False
             record["attempts"] = attempt
             with self._lock:
                 self._persist_outbox()
             body = encode_payload(record["payload"])
             headers = build_headers(record["payload"], body, config["secret"])
             ok, status, error = post_json(
-                record["url"], body, headers, self.timeout
+                record["url"], body, headers, self._timeout_for(config)
             )
             if ok:
                 return True, status, None, False
             if self._stop.is_set():
                 return False, status, "dispatcher stopped", True
-            if attempt < self.max_attempts:
-                wait_for = self.backoff[min(attempt - 1, len(self.backoff) - 1)]
-                if self._stop.wait(wait_for):
-                    return False, status, "dispatcher stopped", True
-        return False, status, error, False
+            if attempt >= max_attempts:
+                return False, status, error, False
+            backoff = self._backoff_for(config)
+            wait_for = (
+                backoff[min(attempt - 1, len(backoff) - 1)] if backoff else 0
+            )
+            if self._stop.wait(wait_for):
+                return False, status, "dispatcher stopped", True
+            attempt += 1
 
     def _write_status(self, record: dict, ok: bool, status, error):
         payload = {

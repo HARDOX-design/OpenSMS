@@ -81,8 +81,34 @@ class LocalSaveTestCase(unittest.TestCase):
         return form
 
 
-class LocalSaveMergeTests(LocalSaveTestCase):
+class WritableSettingsTests(LocalSaveTestCase):
 
+    def test_invalid_stored_retry_values_report_the_effective_defaults(self):
+        config = self.stored_config()
+        config["webhook"].update({
+            "timeout": 0,
+            "max_attempts": "many",
+            "backoff": [],
+            "capacity": 99999,
+        })
+        self.write_config(config)
+
+        writable = settingsSvc.writable_settings(
+            settingsSvc.load_settings(self.config_path)
+        )
+
+        webhook = writable["webhook"]
+        self.assertEqual(webhook["timeout"], settingsSvc.DEFAULT_TIMEOUT)
+        self.assertEqual(
+            webhook["max_attempts"], settingsSvc.DEFAULT_MAX_ATTEMPTS
+        )
+        self.assertEqual(
+            webhook["backoff"], list(settingsSvc.DEFAULT_BACKOFF)
+        )
+        self.assertEqual(webhook["capacity"], settingsSvc.DEFAULT_CAPACITY)
+
+
+class LocalSaveMergeTests(LocalSaveTestCase):
     def test_entering_then_saving_keeps_a_remote_webhook_target(self):
         # The screen re-reads on entry, so it shows the remote target.
         current = settingsSvc.load_settings(self.config_path)
