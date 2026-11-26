@@ -95,7 +95,7 @@ jobs:
           ver = os.environ['VERSION'].lstrip('v')
           with open('CHANGELOG.md', 'r', encoding='utf-8') as f:
               text = f.read()
-          # Match from '### 1.2.0' until the next '### ' or '## ' heading
+          # Match from '### 1.1.0' until the next '### ' or '## ' heading
           pattern = rf'(?m)^###\s+v?{re.escape(ver)}\b.*?\n(.*?)(?=^###?\s|\Z)'
           match = re.search(pattern, text, re.DOTALL)
           notes = match.group(1).strip() if match else f'Release {ver}'

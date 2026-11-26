@@ -152,28 +152,12 @@ def _settings_path() -> str:
 # Key persistence lives in keySvc. These adapters keep existing server, UI, and
 # CLI call sites working while binding them to this module's config-directory
 # seam and activity logger.
-def hash_api_key(raw_key: str) -> str:
-    return keySvc.hash_api_key(raw_key)
-
-
-def load_key_store() -> tuple[dict, bool]:
-    return keySvc.load_key_store(get_config_dir())
-
-
-def save_key_store(store: dict):
-    keySvc.save_key_store(get_config_dir(), store)
-
-
 def authenticate_key(raw_key: str) -> dict | None:
     return keySvc.authenticate_key(get_config_dir(), raw_key)
 
 
 def has_api_keys() -> bool:
     return keySvc.has_api_keys(get_config_dir())
-
-
-def public_key(entry: dict) -> dict:
-    return keySvc.public_key(entry)
 
 
 def create_api_key(name, scopes=_DEFAULT_SCOPES) -> dict:
@@ -569,14 +553,11 @@ def require_scope(scope: str):
 async def api_health(
     client: dict = Depends(require_scope(SCOPE_SETTINGS))
 ):
-    server = getattr(app.state, "server", None)
-    started_at = getattr(server, "started_at", None) or _started_at
-    uptime_s = max(0, int(time.time() - started_at)) if started_at else 0
     return {
         "status": "ok",
         "version": __version__,
         "platform": platform,
-        "uptime_s": uptime_s,
+        "uptime_s": _status_uptime_s(),
     }
 
 def _status_runtime(name: str, fallback=None):

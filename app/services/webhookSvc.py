@@ -449,25 +449,25 @@ class WebhookDispatcher:
     ## Live Settings
 
     @staticmethod
-    def _resolved(override, live_value):
+    def _override_or_live(override, live_value):
         """An explicit constructor override always wins over live Settings."""
         return live_value if override is None else override
 
     def _timeout_for(self, config: dict) -> float:
-        return self._resolved(self._timeout_override, config["timeout"])
+        return self._override_or_live(self._timeout_override, config["timeout"])
 
     def _backoff_for(self, config: dict) -> tuple:
-        return self._resolved(
+        return self._override_or_live(
             self._backoff_override, tuple(config["backoff"])
         )
 
     def _max_attempts_for(self, config: dict) -> int:
-        return self._resolved(
+        return self._override_or_live(
             self._max_attempts_override, config["max_attempts"]
         )
 
     def _capacity_for(self, config: dict) -> int:
-        return self._resolved(
+        return self._override_or_live(
             self._capacity_override, config["capacity"]
         )
 

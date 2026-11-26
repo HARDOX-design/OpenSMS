@@ -1,6 +1,6 @@
 # Remote Settings & Control API
 
-**Status:** agreed design, not implemented.
+**Status:** implemented; ships as `1.2.0`.
 **Supersedes:** the handoff brief of 2026-11-26.
 **Baseline:** `develop` at `f3c7ba1`, app version `1.1.0`.
 **Target:** ship as `1.2.0`; PRs go to `develop` (see `CONTRIBUTE.md`).
@@ -101,7 +101,7 @@ Other facts that constrain the work:
 | D3 | `PUT /api/settings` replaces the **writable subset** in full. Unknown fields are rejected. Internal fields (`app`, `permissions`) and unknown disk fields are preserved. | Full replace avoids ambiguous patch semantics; preserving internal fields keeps the UI's config intact. |
 | D4 | Every write bumps `revision`. `PUT` accepts an **optional** top-level `revision`; if present and stale, return `409`. | Two remote writers otherwise last-writer-wins. Optional keeps hand-written clients simple. |
 | D5 | Restart is explicit and goes through `request.json`. A handler never calls `stop()` on its own server. `409` if already stopping/stopped, or if a restart happened within 5 s. | Stopping uvicorn from inside a request risks answering into a dead socket. |
-| D6 | `config.json` is the single source of truth for the port. `request.json` carries intents only. | The UI currently seeds the port twice; one owner removes a class of drift. |
+| D6 | `config.json` is the single source of truth for the port. `request.json` carries intents; the Restart intent includes the port to start with, used only as a fallback. | The UI currently seeds the port twice; one owner removes a class of drift. |
 | D7 | All JSON writes are atomic: temp file in the same directory, `os.replace`. | A 0.2 s poller can otherwise read a partial file. |
 | D8 | The UI re-reads `config.json` on Settings entry and merges on save through `settingsSvc`, preserving `revision` and unknown fields. | Today the UI holds a stale whole-object cache and clobbers remote changes. |
 | D9 | `keys.json` v2: array of `{id, name, hash, scopes, created_at}`. Refuse to delete the last key (`409`). UI rotation replaces only the key named `opensms`. | Named keys need stable ids; nuking proxy-owned keys from the phone would be hostile. |

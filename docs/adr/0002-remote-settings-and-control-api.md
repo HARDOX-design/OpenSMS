@@ -16,7 +16,8 @@ See `docs/remote-api.md` for the contract.
 - **Writing settings directly from the service, bypassing `config.json`**: rejected.
   The UI reads the same file, the webhook worker hot-reloads it per delivery, and
   the port must have one owner. `config.json` stays the single source of truth;
-  `request.json` carries intents only.
+  `request.json` carries intents, including the port a Restart should use (a
+  fallback only).
 - **PATCH / partial-merge semantics**: rejected. Partial merges make "clear the
   secret", "leave it alone", and "the field was absent" indistinguishable against
   a UI that also holds a stale object. The API replaces the writable subset in

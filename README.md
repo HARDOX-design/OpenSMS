@@ -143,7 +143,7 @@ Every `/api/` route, including `GET /api/health`, requires an API key with the `
 | `sms:write` | `POST /sms/` |
 | `settings:write` | every `/api/` route: health, status, Settings, key management, Webhook test, Restart |
 
-The first API key is generated from the phone UI when the server starts. Create a separate key for each integration; the raw key is returned only once. Set it once in your shell:
+The first API key is created from the phone UI the first time you tap Start Server. Create a separate key for each integration; the raw key is returned only once. Set it once in your shell:
 
 ```bash
 export OSMS_KEY='osms_…'

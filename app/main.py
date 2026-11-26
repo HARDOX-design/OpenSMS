@@ -860,13 +860,8 @@ class OpenSmsApp(MDApp):
             "port": defaults["port"],
             "boot": defaults["boot"],
             "webhook": {
-                "enabled": default_webhook["enabled"],
-                "url": default_webhook["url"],
-                "secret": default_webhook["secret"],
-                "timeout": default_webhook["timeout"],
-                "max_attempts": default_webhook["max_attempts"],
+                **default_webhook,
                 "backoff": list(default_webhook["backoff"]),
-                "capacity": default_webhook["capacity"],
             },
         }
         if not self.persist_settings_form(form):
