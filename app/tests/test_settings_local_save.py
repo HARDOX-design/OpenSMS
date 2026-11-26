@@ -15,7 +15,7 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from services import settingsSvc
+from services import settingsSvc, webhookSvc
 
 
 class LocalSaveTestCase(unittest.TestCase):
@@ -91,6 +91,23 @@ class LocalSaveTestCase(unittest.TestCase):
 
 class WritableSettingsTests(LocalSaveTestCase):
 
+    def test_settings_use_the_dispatcher_webhook_defaults(self):
+        self.assertEqual(
+            settingsSvc.default_webhook_settings(),
+            webhookSvc.default_webhook_config(),
+        )
+
+    def test_default_backoff_lists_are_not_shared(self):
+        settings = settingsSvc.default_settings()
+        settings["webhook"]["backoff"].append(1)
+
+        self.assertEqual(
+            settingsSvc.default_settings()["webhook"]["backoff"], [5, 30]
+        )
+        self.assertEqual(
+            webhookSvc.default_webhook_config()["backoff"], [5, 30]
+        )
+
     def test_invalid_stored_retry_values_report_the_effective_defaults(self):
         config = self.stored_config()
         config["webhook"].update({
@@ -106,14 +123,14 @@ class WritableSettingsTests(LocalSaveTestCase):
         )
 
         webhook = writable["webhook"]
-        self.assertEqual(webhook["timeout"], settingsSvc.DEFAULT_TIMEOUT)
+        self.assertEqual(webhook["timeout"], webhookSvc.DEFAULT_TIMEOUT)
         self.assertEqual(
-            webhook["max_attempts"], settingsSvc.DEFAULT_MAX_ATTEMPTS
+            webhook["max_attempts"], webhookSvc.DEFAULT_MAX_ATTEMPTS
         )
         self.assertEqual(
-            webhook["backoff"], list(settingsSvc.DEFAULT_BACKOFF)
+            webhook["backoff"], list(webhookSvc.DEFAULT_BACKOFF)
         )
-        self.assertEqual(webhook["capacity"], settingsSvc.DEFAULT_CAPACITY)
+        self.assertEqual(webhook["capacity"], webhookSvc.DEFAULT_CAPACITY)
 
 
 class LocalSaveMergeTests(LocalSaveTestCase):

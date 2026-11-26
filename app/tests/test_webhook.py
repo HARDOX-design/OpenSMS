@@ -236,6 +236,26 @@ class WebhookSvcTests(unittest.TestCase):
         self.assertIsNone(status)
         self.assertTrue(error)
 
+    def test_saved_timeout_is_passed_to_the_http_client(self):
+        self.write_live_webhook(timeout=7)
+        saved = webhookSvc.get_webhook_config(self.config_path)
+        calls = []
+
+        def record(url, body, headers, timeout):
+            calls.append((url, timeout))
+            return True, 204, None
+
+        with mock.patch.object(webhookSvc, "post_json", side_effect=record):
+            ok, status, error = webhookSvc.send_test_webhook(
+                {"url": self.target.url, "secret": "s3cret"},
+                timeout=saved["timeout"],
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(status, 204)
+        self.assertIsNone(error)
+        self.assertEqual(calls[0][1], 7)
+
     def test_credentialed_target_is_not_posted_by_test_delivery(self):
         url = self.target.url.replace("http://", "http://user:password@")
 
@@ -440,7 +460,7 @@ class WebhookSvcTests(unittest.TestCase):
         config = webhookSvc.normalize_webhook_config({
             "enabled": True,
             "url": self.target.url,
-            "timeout": 0,
+            "timeout": 61,
             "max_attempts": "many",
             "backoff": [0, -1],
             "capacity": 99999,
@@ -451,6 +471,33 @@ class WebhookSvcTests(unittest.TestCase):
         )
         self.assertEqual(config["backoff"], list(webhookSvc.DEFAULT_BACKOFF))
         self.assertEqual(config["capacity"], webhookSvc.DEFAULT_CAPACITY)
+
+    def test_malformed_stored_timeout_values_use_the_default(self):
+        for timeout in (0, 61, "7", True, 7.0, None):
+            with self.subTest(timeout=timeout):
+                config = webhookSvc.normalize_webhook_config({"timeout": timeout})
+                self.assertEqual(
+                    config["timeout"], webhookSvc.DEFAULT_TIMEOUT
+                )
+
+    def test_missing_config_uses_loaded_timeout_but_malformed_config_does_not(self):
+        missing_path = os.path.join(self.tmp.name, "missing-config.json")
+        fallback = {"timeout": 7}
+        self.assertEqual(
+            webhookSvc.get_webhook_config(
+                missing_path, fallback=fallback
+            )["timeout"],
+            7,
+        )
+
+        with open(missing_path, "w", encoding="utf-8") as cf:
+            cf.write("{not json")
+        self.assertEqual(
+            webhookSvc.get_webhook_config(
+                missing_path, fallback=fallback
+            )["timeout"],
+            webhookSvc.DEFAULT_TIMEOUT,
+        )
 
     def test_malformed_settings_never_crash_the_dispatcher(self):
         with open(self.config_path, "w", encoding="utf-8") as cf:

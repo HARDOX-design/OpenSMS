@@ -18,14 +18,11 @@ from services.webhookSvc import (
     BACKOFF_MIN_COUNT,
     CAPACITY_MAX,
     CAPACITY_MIN,
-    DEFAULT_BACKOFF,
-    DEFAULT_CAPACITY,
-    DEFAULT_MAX_ATTEMPTS,
-    DEFAULT_TIMEOUT,
     MAX_ATTEMPTS_MAX,
     MAX_ATTEMPTS_MIN,
     TIMEOUT_MAX,
     TIMEOUT_MIN,
+    default_webhook_config,
     has_target_credentials,
     is_valid_target,
     normalize_webhook_config,
@@ -79,15 +76,8 @@ class SettingsLoadError(ValueError):
 ## Defaults
 
 def default_webhook_settings() -> dict:
-    return {
-        "enabled": False,
-        "url": "",
-        "secret": "",
-        "timeout": DEFAULT_TIMEOUT,
-        "max_attempts": DEFAULT_MAX_ATTEMPTS,
-        "backoff": list(DEFAULT_BACKOFF),
-        "capacity": DEFAULT_CAPACITY,
-    }
+    """Return the dispatcher-owned defaults in the persisted Settings shape."""
+    return default_webhook_config()
 
 def default_settings() -> dict:
     return {

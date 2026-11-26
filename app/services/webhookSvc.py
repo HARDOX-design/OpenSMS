@@ -114,12 +114,25 @@ def normalize_webhook_config(raw: dict | None) -> dict:
         )
     return config
 
-def get_webhook_config(config_path: str) -> dict:
-    """Read the current webhook config from the app config file (hot reload)."""
+def get_webhook_config(
+    config_path: str, fallback: dict | None = None
+) -> dict:
+    """Read the current webhook config from the app config file (hot reload).
+
+    ``fallback`` is used only when the config file is absent, such as before
+    the on-device Settings screen has written it for the first time. An
+    unreadable or malformed file keeps the dispatcher-owned defaults.
+    """
+    if not config_path:
+        return normalize_webhook_config(fallback)
     try:
         with open(config_path, "r", encoding="utf-8") as cf:
             app_config = json.load(cf)
+    except FileNotFoundError:
+        return normalize_webhook_config(fallback)
     except Exception:
+        return default_webhook_config()
+    if not isinstance(app_config, dict):
         return default_webhook_config()
     return normalize_webhook_config(app_config.get("webhook"))
 

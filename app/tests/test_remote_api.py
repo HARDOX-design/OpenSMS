@@ -10,7 +10,7 @@ from unittest import mock
 from api_test_case import ApiTestCase
 from test_webhook import MockTarget
 
-from services import postApi
+from services import keySvc, postApi
 from services.config import __version__
 from services.pathMgr import get_os_platform
 
@@ -22,9 +22,31 @@ class ApiHarnessTests(ApiTestCase):
             "/sms/",
             json={"number": "+14155552671", "text": "hello"},
         )
-
         self.assertEqual(response.status_code, 403)
         self.assertNotIn("stat", response.json())
+
+    def test_mutating_key_and_settings_operations_declare_request_bodies(self):
+        response = self.client.get("/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        paths = openapi["paths"]
+        for path, method in (
+            ("/api/settings", "put"),
+            ("/api/keys", "post"),
+        ):
+            with self.subTest(path=path):
+                request_body = paths[path][method]["requestBody"]
+                self.assertIsNotNone(request_body)
+                self.assertIn(
+                    "application/json",
+                    request_body["content"],
+                )
+        settings_schema = openapi["components"]["schemas"]["SettingsRequest"]
+        self.assertEqual(
+            settings_schema["properties"]["revision"]["type"],
+            "integer",
+        )
 
     def test_api_reads_keys_from_the_temporary_config_directory(self):
         raw_key = postApi.generate_new_api_key()
@@ -55,6 +77,87 @@ class HealthTests(ApiTestCase):
             "/api/health", headers=self.auth("osms_not_a_real_key")
         )
         self.assertEqual(response.status_code, 401)
+
+    def test_health_ignores_malformed_stored_hashes(self):
+        malformed_hashes = (
+            123,
+            None,
+            {"digest": "a" * 64},
+            ["a" * 64],
+            "a" * 63,
+            "g" * 64,
+        )
+        for index, malformed_hash in enumerate(malformed_hashes):
+            with self.subTest(malformed_hash=malformed_hash):
+                store = {
+                    "version": 2,
+                    "keys": [{
+                        "id": f"k_{index:08x}",
+                        "name": f"malformed-{index}",
+                        "hash": malformed_hash,
+                        "scopes": ["sms:write", "settings:write"],
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "owner": "proxy",
+                    }],
+                }
+                with open(
+                    os.path.join(self.config_dir, "keys.json"),
+                    "w",
+                    encoding="utf-8",
+                ) as keys_file:
+                    json.dump(store, keys_file)
+
+                response = self.client.get(
+                    "/api/health",
+                    headers=self.auth("osms_attempt"),
+                )
+
+                self.assertEqual(response.status_code, 401)
+
+    def test_health_accepts_a_valid_hash_after_malformed_entries(self):
+        raw_key = "osms_valid_after_malformed_http"
+        store = {
+            "version": 2,
+            "keys": [
+                {
+                    "id": "k_00000001",
+                    "name": "malformed-type",
+                    "hash": 123,
+                    "scopes": ["sms:write", "settings:write"],
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "owner": "proxy",
+                },
+                {
+                    "id": "k_00000002",
+                    "name": "malformed-content",
+                    "hash": "z" * 64,
+                    "scopes": ["sms:write", "settings:write"],
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "owner": "proxy",
+                },
+                {
+                    "id": "k_00000003",
+                    "name": "valid",
+                    "hash": keySvc.hash_api_key(raw_key),
+                    "scopes": ["sms:write", "settings:write"],
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "owner": "proxy",
+                },
+            ],
+        }
+        with open(
+            os.path.join(self.config_dir, "keys.json"),
+            "w",
+            encoding="utf-8",
+        ) as keys_file:
+            json.dump(store, keys_file)
+
+        response = self.client.get(
+            "/api/health",
+            headers=self.auth(raw_key),
+        )
+
+        self.assertEqual(response.status_code, 200)
 
     def test_health_reports_status_version_platform_and_uptime(self):
         raw_key = self.add_api_key()
@@ -758,10 +861,11 @@ class KeyMigrationTests(ApiTestCase):
         self.assertEqual(store["version"], 2)
         self.assertEqual(len(store["keys"]), 1)
         entry = store["keys"][0]
-        self.assertEqual(entry["hash"], postApi.hash_api_key(raw_key))
+        self.assertEqual(entry["hash"], keySvc.hash_api_key(raw_key))
         self.assertEqual(entry["scopes"], ["settings:write", "sms:write"])
         self.assertTrue(entry["id"].startswith("k_"))
         self.assertTrue(entry["created_at"])
+        self.assertEqual(entry["owner"], "phone")
 
         again = self.client.get(
             "/api/settings", headers=self.auth(raw_key)
@@ -994,6 +1098,23 @@ class SettingsWriteTests(SettingsWriteTestCase):
         )
         self.assertNotIn("new-shared-secret", response.text)
 
+    def test_a_null_secret_is_rejected_without_changing_settings(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+        before = self.read_config()
+
+        response = self.put(
+            self.valid_payload(webhook={"secret": None}), raw_key
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"],
+            "webhook.secret must be a string",
+        )
+        self.assertEqual(self.read_config(), before)
+        self.assertEqual(self.tmp_files(), [])
+
     def test_put_rejects_a_secret_longer_than_256_characters(self):
         self.write_config(self.stored_config())
         raw_key = self.add_api_key()
@@ -1041,6 +1162,48 @@ class SettingsValidationTests(SettingsWriteTestCase):
         for name, overrides in cases.items():
             with self.subTest(name):
                 response = self.put(self.valid_payload(**overrides), raw_key)
+
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIsInstance(response.json()["detail"], str)
+                self.assertTrue(response.json()["detail"])
+                self.assertEqual(self.read_config(), before)
+                self.assertEqual(self.tmp_files(), [])
+
+    def test_put_rejects_coercible_integer_and_boolean_values(self):
+        self.write_config(self.stored_config())
+        raw_key = self.add_api_key()
+        before = self.read_config()
+
+        cases = {
+            "revision string": {"revision": "7"},
+            "revision float": {"revision": 7.0},
+            "revision boolean": {"revision": True},
+            "revision null": {"revision": None},
+            "port string": {"port": "9292"},
+            "port float": {"port": 9292.0},
+            "port boolean": {"port": True},
+            "boot string true": {"boot": "true"},
+            "timeout string": {"webhook": {"timeout": "7"}},
+            "timeout float": {"webhook": {"timeout": 7.0}},
+            "timeout boolean": {"webhook": {"timeout": True}},
+            "enabled string true": {"webhook": {"enabled": "true"}},
+            "max attempts string": {"webhook": {"max_attempts": "7"}},
+            "max attempts float": {"webhook": {"max_attempts": 7.0}},
+            "max attempts boolean": {"webhook": {"max_attempts": True}},
+            "backoff string": {"webhook": {"backoff": ["7"]}},
+            "backoff float": {"webhook": {"backoff": [7.0]}},
+            "backoff boolean": {"webhook": {"backoff": [True]}},
+            "capacity string": {"webhook": {"capacity": "100"}},
+            "capacity float": {"webhook": {"capacity": 100.0}},
+            "capacity boolean": {"webhook": {"capacity": True}},
+        }
+
+        for name, overrides in cases.items():
+            with self.subTest(name):
+                response = self.put(
+                    self.valid_payload(**overrides),
+                    raw_key,
+                )
 
                 self.assertEqual(response.status_code, 422, response.text)
                 self.assertIsInstance(response.json()["detail"], str)
@@ -1132,7 +1295,9 @@ class SettingsValidationTests(SettingsWriteTestCase):
         )
 
         self.assertEqual(response.status_code, 422)
-        self.assertIsInstance(response.json()["detail"], str)
+        self.assertEqual(
+            response.json()["detail"], "Request body must be a JSON object"
+        )
 
     def test_put_rejects_malformed_json(self):
         raw_key = self.add_api_key()
@@ -1144,7 +1309,9 @@ class SettingsValidationTests(SettingsWriteTestCase):
         )
 
         self.assertEqual(response.status_code, 422)
-        self.assertIsInstance(response.json()["detail"], str)
+        self.assertEqual(
+            response.json()["detail"], "Request body must be valid JSON"
+        )
 
 
 class SettingsRevisionTests(SettingsWriteTestCase):
@@ -1520,6 +1687,32 @@ class WebhookTestTests(ApiTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(calls[0][1], 7)
 
+    def test_body_shape_errors_keep_their_messages(self):
+        raw_key = self.add_api_key()
+
+        response = self.client.post(
+            "/api/webhook/test",
+            content=b'{"url": ',
+            headers={**self.auth(raw_key), "Content-Type": "application/json"},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"], "Request body must be valid JSON"
+        )
+
+        response = self.post_test(raw_key, ["not", "an", "object"])
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"], "Request body must be a JSON object"
+        )
+
+        response = self.post_test(raw_key, {"z": 1, "a": 2})
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"],
+            "Unknown field(s) in request: a, z",
+        )
+
     def test_unknown_fields_and_wrong_types_are_rejected(self):
         raw_key = self.add_api_key()
 
@@ -1802,6 +1995,15 @@ class KeyCreateTests(ApiTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIsInstance(response.json()["detail"], str)
 
+    def test_the_phone_key_name_is_reserved_case_insensitively(self):
+        admin = self.add_api_key(name="admin")
+
+        for name in ("opensms", "OpenSMS", "  OPENSMS  "):
+            with self.subTest(name=name):
+                response = self.create_key(admin, {"name": name})
+                self.assertEqual(response.status_code, 422)
+                self.assertIn("reserved", response.json()["detail"].lower())
+
     def test_names_are_trimmed_and_length_checked(self):
         admin = self.add_api_key(name="admin")
 
@@ -1825,15 +2027,41 @@ class KeyCreateTests(ApiTestCase):
         admin = self.add_api_key(name="admin")
 
         response = self.create_key(
-            admin, {"name": "proxy", "unexpected": True}
+            admin, {"name": "proxy", "unexpected": True, "another": 1}
         )
         self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"],
+            "Unknown field(s) in request: another, unexpected",
+        )
 
         response = self.client.post(
             "/api/keys", json=["not", "an", "object"],
             headers=self.auth(admin),
         )
         self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"], "Request body must be a JSON object"
+        )
+
+    def test_create_rejects_malformed_json_and_a_missing_name(self):
+        admin = self.add_api_key(name="admin")
+
+        response = self.client.post(
+            "/api/keys",
+            content=b'{"name": ',
+            headers={**self.auth(admin), "Content-Type": "application/json"},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"], "Request body must be valid JSON"
+        )
+
+        response = self.create_key(admin, {})
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"], "Missing required field: name"
+        )
 
     def test_create_requires_authentication_and_the_settings_scope(self):
         response = self.client.post(
@@ -1853,7 +2081,7 @@ class KeyCreateTests(ApiTestCase):
         entry = next(
             key for key in store["keys"] if key["id"] == created["id"]
         )
-        self.assertEqual(entry["hash"], postApi.hash_api_key(created["key"]))
+        self.assertEqual(entry["hash"], keySvc.hash_api_key(created["key"]))
         self.assertEqual(entry["scopes"], ["settings:write", "sms:write"])
         self.assertNotIn(created["key"], json.dumps(store))
 
@@ -1880,6 +2108,9 @@ class KeyListTests(ApiTestCase):
             "scopes": ["settings:write", "sms:write"],
             "created_at": created["created_at"],
         })
+        self.assertNotIn("owner", entry)
+        self.assertNotIn("hash", entry)
+        self.assertNotIn("key", entry)
         self.assertNotIn("hash", response.text)
         self.assertNotIn(created["key"], response.text)
 
@@ -1990,7 +2221,7 @@ class KeyDeleteTests(ApiTestCase):
 class PhoneKeyRotationTests(ApiTestCase):
 
     def test_rotation_replaces_only_the_phone_key(self):
-        old_phone = self.add_api_key(name="opensms")
+        old_phone = self.add_api_key(name="opensms", owner="phone")
         proxy = self.add_api_key(name="sms-proxy")
 
         new_phone = postApi.generate_new_api_key()
@@ -2016,6 +2247,36 @@ class PhoneKeyRotationTests(ApiTestCase):
         names = [key["name"] for key in self.read_key_store()["keys"]]
         self.assertEqual(names.count("opensms"), 1)
         self.assertIn("sms-proxy", names)
+
+    def test_rotation_preserves_an_existing_proxy_named_opensms(self):
+        proxy = self.add_api_key(name="OpenSMS", owner="proxy")
+
+        new_phone = postApi.generate_new_api_key()
+
+        self.assertEqual(
+            self.client.get(
+                "/api/health", headers=self.auth(proxy)
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.get(
+                "/api/health", headers=self.auth(new_phone)
+            ).status_code,
+            200,
+        )
+        entries = self.read_key_store()["keys"]
+        proxies = [
+            entry for entry in entries
+            if entry.get("owner") == "proxy"
+        ]
+        phones = [
+            entry for entry in entries
+            if entry.get("owner") == "phone"
+        ]
+        self.assertEqual(len(proxies), 1)
+        self.assertEqual(proxies[0]["name"], "OpenSMS")
+        self.assertEqual(len(phones), 1)
 
     def test_rotation_adds_a_phone_key_without_touching_proxy_keys(self):
         proxy = self.add_api_key(name="sms-proxy")

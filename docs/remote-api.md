@@ -128,10 +128,19 @@ See `GLOSSARY.md`: **Settings**, **Revision**, **Scope**, **API key**,
 - Every route, including `/api/health`, requires
   `Authorization: Bearer osms_…`.
 - JSON in, JSON out, UTF-8.
-- Error body: `{"detail": "..."}`. Settings validation is done by hand (not by
-  Pydantic models) so `detail` stays a human-readable string on `422`;
-  FastAPI's malformed-JSON error may still be a list. Clients must tolerate
-  both.
+- Strict Pydantic request models expose editable JSON bodies for
+  `PUT /api/settings` and `POST /api/keys`. They reject unknown fields and
+  lax JSON coercion (including strings/floats/booleans where integers are
+  required). Pydantic validates only the HTTP wire shape.
+- Domain and persistence stay in the owning services:
+  `settingsSvc.save_settings` owns revision checks, business rules, merge-
+  preserving unknown stored keys, and the atomic write; `keySvc` owns key
+  validation and storage.
+- Validation order is wire shape/range → `422`, stale revision → `409`, then
+  Settings business rules → `400`.
+- Error body: `{"detail": "..."}`. A shared `RequestValidationError` handler
+  keeps `422` details human-readable for schema errors and malformed JSON;
+  clients should not parse Pydantic's internal error-list shape.
 - Status codes:
   - `400` business-rule violation
   - `401` invalid key
@@ -393,9 +402,13 @@ when another remains and takes effect immediately.
 Rules:
 
 - Name: trimmed, 2–64 characters, no control characters, unique
-  case-insensitively; duplicate → `409`.
+  case-insensitively; `opensms` is reserved case-insensitively for the phone
+  key and is rejected on proxy-key creation (`422`); duplicate → `409`.
 - Id: `k_` + 8 lowercase hex (`secrets.token_hex(4)`).
 - Scopes stored canonical-sorted.
+- Ownership stored internally with an `owner` marker (`phone` or `proxy`);
+  rotation uses that marker, never the display name. Ownership is normalized
+  for legacy stores. The marker and hashes are never returned by `GET`.
 - Hash: SHA-256 hex, untruncated (unchanged).
 - Lookup: scan every entry with `secrets.compare_digest` against the computed
   hash; do not return early on the first mismatch.
@@ -456,7 +469,7 @@ v1 migration (`{hash: {name, scopes}}`):
 
 - Converted in memory on first load; persisted as v2 on the first key write or
   on the first authenticated request (whichever comes first), guarded by a
-  module lock.
+  module lock and the shared `keys.json.lock` OS file lock.
 - Ids are newly generated; `created_at` becomes "now" (original unknown);
   missing names become `"opensms"`.
 - Scopes: existing scopes **plus** `settings:write`. This is a one-time
@@ -468,12 +481,16 @@ v1 migration (`{hash: {name, scopes}}`):
 
 ## 8. Cross-process behaviour
 
-Two processes write `config.json`. There is no OS-level lock (no new
-dependency). Accepted model:
+Two processes write `config.json`, and the UI and API may mutate `keys.json`.
+Accepted model:
 
 - **Writers**: the API (one uvicorn thread pool) and the Kivy UI.
 - **In-process serialisation**: a module lock around read-modify-write in
-  `settingsSvc`; `keys.json` has its own lock.
+  `settingsSvc`; `keys.json` mutations use one module lock.
+- **Key-store cross-process serialisation**: `keys.json` read-modify-write
+  operations use a stdlib OS file lock at `keys.json.lock`, with no new
+  dependency. This covers key creation, deletion, phone-key rotation,
+  authentication migration, and direct atomic key-store saves.
 - **Cross-process**: last writer wins, but the window is shrunk to
   read-fresh-then-write, and every writer bumps `revision` against the value it
   actually read. The residual race is documented, not hidden.
@@ -637,9 +654,9 @@ Core total ≈ 600–900 source lines, 3–4 focused days.
    the drop policy is unchanged.
 7. **`resp.json` is not a heartbeat.** Do not present it as liveness; the
    response itself proves the API is up.
-8. **Unpinned FastAPI/Pydantic** on desktop vs `pydantic==2.12.3` on Android.
-   Avoid version-specific API usage; request bodies as plain `dict` with manual
-   validation sidesteps Pydantic v1/v2 differences.
+8. **Pydantic request models are an HTTP edge, not a second domain layer.**
+   Strict types and `extra="forbid"` validate the wire shape; `settingsSvc` and
+   `keySvc` retain revision, business-rule, merge, and persistence ownership.
 9. **Bind errors are swallowed** into a callback (`postApi.py:173-178`). The new
    status fields make the failure visible; they do not fix it.
 10. **Key deletion** can lock out the caller only if it is the last key; `409`

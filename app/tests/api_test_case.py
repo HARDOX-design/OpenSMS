@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from fastapi.testclient import TestClient
 
-from services import postApi
+from services import keySvc, postApi
 
 
 class ApiTestCase(unittest.TestCase):
@@ -63,7 +63,8 @@ class ApiTestCase(unittest.TestCase):
             return json.load(keys_file)
 
     def add_api_key(self, scopes=("sms:write", "settings:write"),
-                    name: str = "test") -> str:
+                    name: str = "test",
+                    owner: str = "proxy") -> str:
         """Write a v2 key store entry and return the raw key."""
         raw_key = f"osms_{secrets.token_urlsafe(16)}"
         keys_path = os.path.join(self.config_dir, "keys.json")
@@ -74,9 +75,10 @@ class ApiTestCase(unittest.TestCase):
         store["keys"].append({
             "id": f"k_{secrets.token_hex(4)}",
             "name": name,
-            "hash": postApi.hash_api_key(raw_key),
+            "hash": keySvc.hash_api_key(raw_key),
             "scopes": sorted(scopes),
             "created_at": "2026-01-01T00:00:00+00:00",
+            "owner": owner,
         })
         with open(keys_path, "w", encoding="utf-8") as keys_file:
             json.dump(store, keys_file)
@@ -90,7 +92,7 @@ class ApiTestCase(unittest.TestCase):
             os.path.join(self.config_dir, "keys.json"), "w", encoding="utf-8"
         ) as keys_file:
             json.dump({
-                postApi.hash_api_key(raw_key): {
+                keySvc.hash_api_key(raw_key): {
                     "name": name,
                     "scopes": list(scopes),
                 },

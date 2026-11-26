@@ -47,6 +47,7 @@ from services.config import __version__, app_name
 from services.webhookSvc import (
     default_webhook_config,
     format_webhook_status,
+    get_webhook_config,
     is_valid_target,
     normalize_webhook_config,
     read_webhook_status,
@@ -795,6 +796,20 @@ class OpenSmsApp(MDApp):
             format_webhook_status(status)
         )
 
+    def get_webhook_test_timeout(self) -> int:
+        """Return the normalized timeout from fresh or loaded Settings."""
+        config_template = getattr(self, "config_template", None)
+        fallback = (
+            config_template.get("webhook")
+            if isinstance(config_template, dict)
+            else None
+        )
+        webhook = get_webhook_config(
+            getattr(self, "app_config", None),
+            fallback=fallback,
+        )
+        return webhook["timeout"]
+
     def send_webhook_test(self, instance=None):
         webhook_enabled, webhook_url, webhook_secret = self.read_webhook_inputs()
         # A test always needs a URL, even while the toggle is off.
@@ -804,14 +819,19 @@ class OpenSmsApp(MDApp):
             "Sending test webhook..."
         )
         config = {"url": webhook_url, "secret": webhook_secret}
+        timeout = self.get_webhook_test_timeout()
         Thread(
             target=self.run_webhook_test,
-            kwargs={"config": config},
+            kwargs={"config": config, "timeout": timeout},
             daemon=True,
         ).start()
 
-    def run_webhook_test(self, config: dict):
-        ok, status, error = send_test_webhook(config)
+    def run_webhook_test(self, config: dict, timeout=None):
+        if timeout is None:
+            timeout = self.get_webhook_test_timeout()
+        else:
+            timeout = normalize_webhook_config({"timeout": timeout})["timeout"]
+        ok, status, error = send_test_webhook(config, timeout=timeout)
         Clock.schedule_once(
             lambda dt: self.show_webhook_test_result(ok, status, error)
         )

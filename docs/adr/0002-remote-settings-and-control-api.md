@@ -36,9 +36,10 @@ See `docs/remote-api.md` for the contract.
   `["sms:write"]` but scopes were never read, so every existing install would be
   locked out of the new API. Migration grants both scopes once; v2 keys honour
   whatever they are created with.
-- **Adding an OS file lock or a new dependency**: rejected. The residual
-  cross-process race window is small, documented, and cheaper to accept than to
-  make buildozer ship another native dependency.
+- **Adding an OS file lock or a new dependency**: rejected for Settings. The
+  residual `config.json` cross-process race remains cheap to accept. Key-store
+  mutations use stdlib `fcntl`/`msvcrt` file locks instead, with no native
+  package or buildozer dependency.
 - **Unauthenticated `/api/health`**: rejected. It would reveal the device to any
   host on the LAN; the proxy already holds a key.
 - **CORS or a web UI**: rejected. Server-to-server only.

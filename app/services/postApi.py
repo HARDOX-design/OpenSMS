@@ -1,20 +1,18 @@
-import hashlib
-import re
-import secrets
 import asyncio
 import time
-from datetime import datetime, timezone
 from threading import Thread, Lock, Timer
 from os.path import join
 from urllib.parse import urlparse
 import json
 #from functools import partial
+from typing import Annotated
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictBool, StrictInt, StrictStr
 import uvicorn
 
 # local imports
@@ -22,7 +20,8 @@ from services.pathMgr import get_os_platform
 from services.smsApi import SmsCrossPlatform, clean_and_validate_phone
 from services.logSvc import LogService
 from services.config import __version__, app_name
-from services import netSvc, settingsSvc, controlSvc, webhookSvc
+from services import netSvc, settingsSvc, controlSvc, webhookSvc, keySvc
+from services.keySvc import KeyConflict, KeyValidationError
 
 # OS specific
 #try:
@@ -40,28 +39,11 @@ platform = get_os_platform()
 logger = None
 sms_api = SmsCrossPlatform()
 
-# API key scopes
-SCOPE_SEND = "sms:write"
-SCOPE_SETTINGS = "settings:write"
-
-VALID_SCOPES = frozenset({SCOPE_SEND, SCOPE_SETTINGS})
-PHONE_KEY_NAME = "opensms"
-KEY_NAME_MIN = 2
-KEY_NAME_MAX = 64
-_KEY_ID_PATTERN = re.compile(r"^k_[0-9a-f]{8}$")
-_SCOPE_ERROR = (
-    "scopes must be a non-empty subset of: "
-    + ", ".join(sorted(VALID_SCOPES))
-)
-_DEFAULT_SCOPES = object()
-
-
-class KeyValidationError(ValueError):
-    """A malformed key request (HTTP 422)."""
-
-
-class KeyConflict(Exception):
-    """A key request that conflicts with the stored keys (HTTP 409)."""
+# API key scopes and request sentinel come from the persistence owner.
+SCOPE_SEND = keySvc.SCOPE_SEND
+SCOPE_SETTINGS = keySvc.SCOPE_SETTINGS
+VALID_SCOPES = keySvc.VALID_SCOPES
+_DEFAULT_SCOPES = keySvc.DEFAULT_SCOPES
 
 # Test seam: tests point the API at a temporary config directory so they never
 # read or write the real app data directory.
@@ -70,7 +52,6 @@ _runtime: dict = {}
 _last_restart_at: float | None = None
 _restart_lock = Lock()
 _started_at: float | None = None
-_key_lock = Lock()
 
 # Restart orchestration. The handler acknowledges before anything stops, and
 # the control intent is written only after the response has had time to leave.
@@ -164,204 +145,60 @@ def log_activities(message:str):
             daemon=True
         ).start()
 
-def hash_api_key(raw_key: str) -> str:
-    """Hash the raw key using SHA-256."""
-    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
-
-def _keys_path() -> str:
-    return join(get_config_dir(), "keys.json")
-
 def _settings_path() -> str:
     return join(get_config_dir(), "config.json")
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-def _migrate_v1_keys(raw: dict) -> list:
-    """Convert a version-one {hash: {name, scopes}} store to version two.
+# Key persistence lives in keySvc. These adapters keep existing server, UI, and
+# CLI call sites working while binding them to this module's config-directory
+# seam and activity logger.
+def hash_api_key(raw_key: str) -> str:
+    return keySvc.hash_api_key(raw_key)
 
-    Version-one scopes were stored but never enforced, so migration grants both
-    scopes once; otherwise every existing install would lock itself out.
-    """
-    keys = []
-    for key_hash, info in raw.items():
-        if not isinstance(info, dict):
-            continue
-        scopes = info.get("scopes")
-        if not isinstance(scopes, list):
-            scopes = []
-        scopes = {str(scope) for scope in scopes if isinstance(scope, str)}
-        scopes.update({SCOPE_SEND, SCOPE_SETTINGS})
-        keys.append({
-            "id": f"k_{secrets.token_hex(4)}",
-            "name": str(info.get("name") or PHONE_KEY_NAME),
-            "hash": str(key_hash),
-            "scopes": sorted(scopes),
-            "created_at": _now_iso(),
-        })
-    return keys
 
 def load_key_store() -> tuple[dict, bool]:
-    """Return the key store, migrating a version-one file in memory.
+    return keySvc.load_key_store(get_config_dir())
 
-    The second item is True when a migration is pending persistence.
-    """
-    try:
-        with open(_keys_path(), "r", encoding="utf-8") as keys_file:
-            raw = json.load(keys_file)
-    except Exception:
-        return {"version": 2, "keys": []}, False
-    if not isinstance(raw, dict):
-        return {"version": 2, "keys": []}, False
-    if raw.get("version") == 2 and isinstance(raw.get("keys"), list):
-        keys = [entry for entry in raw["keys"] if isinstance(entry, dict)]
-        return {"version": 2, "keys": keys}, False
-    return {"version": 2, "keys": _migrate_v1_keys(raw)}, True
 
 def save_key_store(store: dict):
-    settingsSvc.atomic_write_json(_keys_path(), store)
+    keySvc.save_key_store(get_config_dir(), store)
+
 
 def authenticate_key(raw_key: str) -> dict | None:
-    hashed = hash_api_key(raw_key)
-    with _key_lock:
-        store, migrated = load_key_store()
-        match = None
-        for entry in store["keys"]:
-            if secrets.compare_digest(entry.get("hash") or "", hashed):
-                match = entry
-        if match is not None and migrated:
-            save_key_store(store)
-    return match
+    return keySvc.authenticate_key(get_config_dir(), raw_key)
+
 
 def has_api_keys() -> bool:
-    store, _ = load_key_store()
-    return bool(store["keys"])
+    return keySvc.has_api_keys(get_config_dir())
 
-def _normalize_key_name(value) -> str:
-    if not isinstance(value, str):
-        raise KeyValidationError("name must be a string")
-    name = value.strip()
-    if not KEY_NAME_MIN <= len(name) <= KEY_NAME_MAX:
-        raise KeyValidationError(
-            f"name must be {KEY_NAME_MIN}-{KEY_NAME_MAX} characters"
-        )
-    if not name.isprintable():
-        raise KeyValidationError("name must not contain control characters")
-    return name
-
-def _normalize_key_scopes(value) -> list:
-    if not isinstance(value, list):
-        raise KeyValidationError("scopes must be a list")
-    scopes = set()
-    for scope in value:
-        if not isinstance(scope, str) or scope not in VALID_SCOPES:
-            raise KeyValidationError(_SCOPE_ERROR)
-        scopes.add(scope)
-    if not scopes:
-        raise KeyValidationError(_SCOPE_ERROR)
-    return sorted(scopes)
-
-def _new_key_entry(name: str, scopes, raw_key: str) -> dict:
-    return {
-        "id": f"k_{secrets.token_hex(4)}",
-        "name": name,
-        "hash": hash_api_key(raw_key),
-        "scopes": sorted(scopes),
-        "created_at": _now_iso(),
-    }
-
-def _new_raw_key() -> str:
-    return f"osms_{secrets.token_urlsafe(32)}"
 
 def public_key(entry: dict) -> dict:
-    """The listable shape of a key: never the hash or the raw key."""
-    scopes = entry.get("scopes")
-    if not isinstance(scopes, list):
-        scopes = []
-    return {
-        "id": entry.get("id"),
-        "name": entry.get("name"),
-        "scopes": list(scopes),
-        "created_at": entry.get("created_at"),
-    }
+    return keySvc.public_key(entry)
+
 
 def create_api_key(name, scopes=_DEFAULT_SCOPES) -> dict:
-    """Create a named key; the raw key is returned only in this result."""
-    name = _normalize_key_name(name)
-    normalized_scopes = (
-        sorted(VALID_SCOPES)
-        if scopes is _DEFAULT_SCOPES
-        else _normalize_key_scopes(scopes)
+    return keySvc.create_api_key(
+        get_config_dir(), name, scopes, log=log_activities
     )
-    raw_key = _new_raw_key()
-    with _key_lock:
-        store, _ = load_key_store()
-        for entry in store["keys"]:
-            existing_name = entry.get("name")
-            if (
-                isinstance(existing_name, str)
-                and existing_name.casefold() == name.casefold()
-            ):
-                raise KeyConflict(f"An API key named {name} already exists")
-        entry = _new_key_entry(name, normalized_scopes, raw_key)
-        store["keys"].append(entry)
-        save_key_store(store)
-    log_activities(f"API key created: {name}")
-    return {**public_key(entry), "key": raw_key}
+
 
 def list_api_keys() -> list:
-    """Every key without its hash or raw value."""
-    store, _ = load_key_store()
-    return [public_key(entry) for entry in store["keys"]]
+    return keySvc.list_api_keys(get_config_dir())
+
 
 def delete_api_key(key_id: str) -> bool:
-    """Delete a key by id, returning False when it does not exist.
+    return keySvc.delete_api_key(
+        get_config_dir(), key_id, log=log_activities
+    )
 
-    Raises KeyConflict when deleting it would leave no key at all.
-    """
-    if not isinstance(key_id, str) or not _KEY_ID_PATTERN.fullmatch(key_id):
-        return False
-    with _key_lock:
-        store, _ = load_key_store()
-        keys = store["keys"]
-        index = next(
-            (
-                position
-                for position, entry in enumerate(keys)
-                if entry.get("id") == key_id
-            ),
-            None,
-        )
-        if index is None:
-            return False
-        if len(keys) <= 1:
-            raise KeyConflict("The last remaining API key cannot be deleted")
-        removed = keys.pop(index)
-        save_key_store(store)
-    log_activities(f"API key deleted: {removed.get('name')}")
-    return True
 
 def rotate_phone_key() -> str:
-    """Replace only the phone-owned key, leaving proxy-owned keys intact."""
-    raw_key = _new_raw_key()
-    with _key_lock:
-        store, _ = load_key_store()
-        store["keys"] = [
-            entry for entry in store["keys"]
-            if str(entry.get("name") or "").casefold() != PHONE_KEY_NAME
-        ]
-        store["keys"].append(
-            _new_key_entry(PHONE_KEY_NAME, VALID_SCOPES, raw_key)
-        )
-        save_key_store(store)
-    print("Replaced the phone API key")
-    log_activities("Replaced the phone API key")
-    return raw_key
+    return keySvc.rotate_phone_key(get_config_dir(), log=log_activities)
+
 
 def generate_new_api_key() -> str:
     """Backwards-compatible entry point for rotating the phone key."""
     return rotate_phone_key()
-
 
 
 # data formatting for request
@@ -370,9 +207,228 @@ class SmsData(BaseModel):
     text: str
     #sub_text: str | None = None
 
+
+BackoffWait = Annotated[
+    StrictInt,
+    Field(ge=1, le=settingsSvc.BACKOFF_MAX_SECONDS),
+]
+
+
+class WebhookSettingsRequest(BaseModel):
+    enabled: StrictBool
+    url: StrictStr
+    timeout: StrictInt = Field(
+        ge=settingsSvc.TIMEOUT_MIN,
+        le=settingsSvc.TIMEOUT_MAX,
+    )
+    max_attempts: StrictInt = Field(
+        ge=settingsSvc.MAX_ATTEMPTS_MIN,
+        le=settingsSvc.MAX_ATTEMPTS_MAX,
+    )
+    backoff: list[BackoffWait] = Field(
+        min_length=settingsSvc.BACKOFF_MIN_COUNT,
+        max_length=settingsSvc.BACKOFF_MAX_COUNT,
+        min_items=settingsSvc.BACKOFF_MIN_COUNT,
+        max_items=settingsSvc.BACKOFF_MAX_COUNT,
+    )
+    capacity: StrictInt = Field(
+        ge=settingsSvc.CAPACITY_MIN,
+        le=settingsSvc.CAPACITY_MAX,
+    )
+    secret: StrictStr = Field(
+        default=None,
+        max_length=settingsSvc.SECRET_MAX_LENGTH,
+    )
+
+    class Config:
+        extra = "forbid"
+
+
+class SettingsRequest(BaseModel):
+    revision: StrictInt = None
+    port: StrictInt = Field(
+        ge=settingsSvc.PORT_MIN,
+        le=settingsSvc.PORT_MAX,
+    )
+    boot: StrictBool
+    webhook: WebhookSettingsRequest
+
+    def __init__(self, **data):
+        if "revision" in data and data["revision"] is None:
+            raise ValueError("revision must be an integer")
+        webhook = data.get("webhook")
+        if (
+            isinstance(webhook, dict)
+            and "secret" in webhook
+            and webhook["secret"] is None
+        ):
+            raise ValueError("webhook.secret must be a string")
+        super().__init__(**data)
+
+    class Config:
+        extra = "forbid"
+
+
+class KeyCreateRequest(BaseModel):
+    name: StrictStr
+    scopes: list[StrictStr] = None
+
+    def __init__(self, **data):
+        if "scopes" in data and data["scopes"] is None:
+            raise ValueError("scopes must be a list")
+        super().__init__(**data)
+
+    class Config:
+        extra = "forbid"
+
+
 # FastAPI app
 app = FastAPI()
 security = HTTPBearer(auto_error=False)
+
+
+def _model_dump(model):
+    if hasattr(model, "model_dump"):
+        return model.model_dump(exclude_unset=True)
+    return model.dict(exclude_unset=True)
+
+
+def _request_validation_detail(exc: RequestValidationError) -> str:
+    errors = exc.errors()
+    if not errors:
+        return "Request body must be valid JSON"
+
+    error = errors[0]
+    error_type = str(error.get("type", ""))
+    loc = tuple(error.get("loc", ()))
+    field_parts = [
+        str(part)
+        for part in loc
+        if str(part) not in ("body", "__root__")
+    ]
+    field = ".".join(field_parts)
+    message = str(error.get("msg", ""))
+
+    if error_type in {"json_invalid", "value_error.jsondecode"}:
+        return "Request body must be valid JSON"
+
+    if "webhook.secret must be a string" in message:
+        return "webhook.secret must be a string"
+    if "scopes must be a list" in message:
+        return "scopes must be a list"
+    if "revision must be an integer" in message:
+        return "revision must be an integer"
+
+    if error_type in {"extra_forbidden", "value_error.extra"}:
+        extra_errors = [
+            item
+            for item in errors
+            if str(item.get("type", "")) in {
+                "extra_forbidden",
+                "value_error.extra",
+            }
+        ]
+        names = sorted({
+            str(item["loc"][-1])
+            for item in extra_errors
+            if item.get("loc")
+        })
+        prefix = "webhook" if "webhook" in field_parts else "request"
+        return f"Unknown field(s) in {prefix}: {', '.join(names)}"
+
+    if error_type in {"missing", "value_error.missing"}:
+        if not field_parts:
+            return "Request body must be valid JSON"
+        if "webhook" in field_parts:
+            return f"Missing required webhook field: {field_parts[-1]}"
+        return f"Missing required field: {field_parts[-1]}"
+
+    if not field_parts and error_type in {
+        "model_attributes_type",
+        "model_type",
+        "dict_type",
+        "list_type",
+        "type_error.dict",
+        "type_error.list",
+    }:
+        return "Request body must be a JSON object"
+
+    if field == "revision":
+        return "revision must be an integer"
+    if field == "port":
+        return (
+            f"port must be an integer between "
+            f"{settingsSvc.PORT_MIN} and {settingsSvc.PORT_MAX}"
+        )
+    if field == "boot":
+        return "boot must be a boolean"
+    if field == "webhook":
+        return "webhook must be an object"
+    if field == "webhook.enabled":
+        return "webhook.enabled must be a boolean"
+    if field == "webhook.url":
+        return "webhook.url must be a string"
+    if field == "webhook.timeout":
+        return (
+            f"webhook.timeout must be an integer between "
+            f"{settingsSvc.TIMEOUT_MIN} and {settingsSvc.TIMEOUT_MAX}"
+        )
+    if field == "webhook.max_attempts":
+        return (
+            f"webhook.max_attempts must be an integer between "
+            f"{settingsSvc.MAX_ATTEMPTS_MIN} and "
+            f"{settingsSvc.MAX_ATTEMPTS_MAX}"
+        )
+    if field == "webhook.backoff":
+        return (
+            f"webhook.backoff must be a list of "
+            f"{settingsSvc.BACKOFF_MIN_COUNT}-"
+            f"{settingsSvc.BACKOFF_MAX_COUNT} integers"
+        )
+    if field.startswith("webhook.backoff."):
+        index = field.rsplit(".", 1)[-1]
+        return (
+            f"webhook.backoff[{index}] must be an integer between 1 and "
+            f"{settingsSvc.BACKOFF_MAX_SECONDS}"
+        )
+    if field == "webhook.capacity":
+        return (
+            f"webhook.capacity must be an integer between "
+            f"{settingsSvc.CAPACITY_MIN} and {settingsSvc.CAPACITY_MAX}"
+        )
+    if field == "webhook.secret":
+        if error_type in {
+            "string_too_long",
+            "value_error.any_str.max_length",
+        }:
+            return (
+                f"webhook.secret must be at most "
+                f"{settingsSvc.SECRET_MAX_LENGTH} characters"
+            )
+        return "webhook.secret must be a string"
+    if field == "name":
+        return "name must be a string"
+    if field == "scopes":
+        return "scopes must be a list"
+    if field.startswith("scopes."):
+        return (
+            "scopes must be a non-empty subset of: "
+            + ", ".join(sorted(keySvc.VALID_SCOPES))
+        )
+
+    return message.removeprefix("Value error, ").replace("Value error, ", "")
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(
+    request: Request,
+    exc: RequestValidationError,
+):
+    return JSONResponse(
+        status_code=422,
+        content={"detail": _request_validation_detail(exc)},
+    )
+
 
 # api server class with callback function
 class PosiApiServer:
@@ -789,72 +845,75 @@ def _schedule_restart(config_dir: str, port: int):
     timer.start()
 
 
-@app.put("/api/settings")
-async def api_put_settings(
-    request: Request,
-    client: dict = Depends(require_scope(SCOPE_SETTINGS))
-):
+async def _request_json(request: Request, *, allow_empty: bool = False):
+    """Parse a JSON body, optionally treating no body as an empty object."""
+    raw_body = await request.body()
+    if allow_empty and not raw_body:
+        return {}
     try:
-        payload = await request.json()
+        return json.loads(raw_body)
     except Exception:
         raise HTTPException(
             status_code=422,
             detail="Request body must be valid JSON",
         )
+
+
+def _require_json_object(payload):
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="Request body must be a JSON object",
+        )
+    return payload
+
+
+async def _request_json_object(
+    request: Request, *, allow_empty: bool = False
+) -> dict:
+    payload = await _request_json(request, allow_empty=allow_empty)
+    return _require_json_object(payload)
+
+
+def _reject_unknown_fields(payload: dict, allowed_fields):
+    unknown = set(payload) - allowed_fields
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown field(s) in request: {', '.join(sorted(unknown))}",
+        )
+
+
+@app.put("/api/settings")
+async def api_put_settings(
+    payload: SettingsRequest,
+    client: dict = Depends(require_scope(SCOPE_SETTINGS))
+):
+    payload_dict = _model_dump(payload)
     try:
-        saved = settingsSvc.save_settings(_settings_path(), payload)
+        saved = settingsSvc.save_settings(_settings_path(), payload_dict)
     except settingsSvc.SettingsRevisionConflict as exc:
         raise HTTPException(status_code=409, detail=exc.detail)
     except settingsSvc.SettingsRuleError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except settingsSvc.SettingsValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    log_activities(_settings_log_message(payload))
+    log_activities(_settings_log_message(payload_dict))
     return {
         **_settings_body(saved),
         "restart_required": _restart_required(saved),
     }
 
-KEY_REQUEST_FIELDS = {"name", "scopes"}
-
-
-async def _key_request_body(request: Request) -> dict:
-    """Validate the shape of a key-creation body, before touching the store."""
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(
-            status_code=422,
-            detail="Request body must be valid JSON",
-        )
-    if not isinstance(payload, dict):
-        raise HTTPException(
-            status_code=422,
-            detail="Request body must be a JSON object",
-        )
-    unknown = set(payload) - KEY_REQUEST_FIELDS
-    if unknown:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unknown field(s) in request: {', '.join(sorted(unknown))}",
-        )
-    if "name" not in payload:
-        raise HTTPException(
-            status_code=422,
-            detail="Missing required field: name",
-        )
-    return payload
-
-
 @app.post("/api/keys", status_code=201)
 async def api_create_key(
-    request: Request,
+    payload: KeyCreateRequest,
     client: dict = Depends(require_scope(SCOPE_SETTINGS))
 ):
-    payload = await _key_request_body(request)
+    payload_dict = _model_dump(payload)
     try:
         return create_api_key(
-            payload["name"], payload.get("scopes", _DEFAULT_SCOPES)
+            payload_dict["name"],
+            payload_dict.get("scopes", _DEFAULT_SCOPES),
         )
     except KeyConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc))
@@ -884,19 +943,9 @@ async def api_delete_key(
 WEBHOOK_TEST_FIELDS = {"url", "secret"}
 
 
-def _webhook_test_overrides(payload) -> dict:
-    """Validate a Webhook test body; an absent body means "use saved Settings"."""
-    if not isinstance(payload, dict):
-        raise HTTPException(
-            status_code=422,
-            detail="Request body must be a JSON object",
-        )
-    unknown = set(payload) - WEBHOOK_TEST_FIELDS
-    if unknown:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unknown field(s) in request: {', '.join(sorted(unknown))}",
-        )
+def _webhook_test_overrides(payload: dict) -> dict:
+    """Validate Webhook test overrides; an absent body means saved Settings."""
+    _reject_unknown_fields(payload, WEBHOOK_TEST_FIELDS)
     overrides = {}
     if "url" in payload:
         if not isinstance(payload["url"], str):
@@ -981,16 +1030,7 @@ async def api_webhook_test(
     request: Request,
     client: dict = Depends(require_scope(SCOPE_SETTINGS))
 ):
-    raw_body = await request.body()
-    payload = {}
-    if raw_body:
-        try:
-            payload = json.loads(raw_body)
-        except Exception:
-            raise HTTPException(
-                status_code=422,
-                detail="Request body must be valid JSON",
-            )
+    payload = await _request_json_object(request, allow_empty=True)
     overrides = _webhook_test_overrides(payload)
     settings = settingsSvc.load_settings(_settings_path())
     url, secret, timeout = _resolve_webhook_test_config(settings, overrides)
