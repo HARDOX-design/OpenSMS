@@ -1,10 +1,14 @@
 import glob
+import hashlib
+import hmac
 import json
 import os
 import threading
 import time
+from unittest import mock
 
 from api_test_case import ApiTestCase
+from test_webhook import MockTarget
 
 from services import postApi
 from services.config import __version__
@@ -934,3 +938,249 @@ class SettingsWriteLoggingTests(SettingsWriteTestCase):
         self.assertNotIn("super-duper-secret", logged)
         self.assertNotIn("SENSITIVE-PATH", logged)
         self.assertNotIn("old-secret", logged)
+
+
+class WebhookTestTests(ApiTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.target = MockTarget()
+        self.target.redirect_to(self.target.url + "-redirected")
+
+    def tearDown(self):
+        self.target.close()
+        super().tearDown()
+
+    def post_test(self, raw_key: str, payload=None):
+        kwargs = {"headers": self.auth(raw_key)}
+        if payload is not None:
+            kwargs["json"] = payload
+        return self.client.post("/api/webhook/test", **kwargs)
+
+    def save_webhook(self, **overrides) -> dict:
+        webhook = {
+            "enabled": False,
+            "url": self.target.url,
+            "secret": "saved-secret",
+            "timeout": 5,
+            "max_attempts": 3,
+            "backoff": [5, 30],
+            "capacity": 100,
+        }
+        webhook.update(overrides)
+        self.write_config({"webhook": webhook})
+        return webhook
+
+    def signature_for(self, secret: str, body: bytes) -> str:
+        digest = hmac.new(
+            secret.encode("utf-8"), body, hashlib.sha256
+        ).hexdigest()
+        return f"sha256={digest}"
+
+    def test_success_reports_the_status_and_a_null_error(self):
+        raw_key = self.add_api_key()
+
+        response = self.post_test(
+            raw_key, {"url": self.target.url, "secret": "override-secret"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            "ok": True,
+            "http_status": 200,
+            "error": None,
+        })
+        request = self.target.next_request()
+        self.assertEqual(json.loads(request["body"])["event"], "webhook.test")
+        self.assertEqual(
+            request["headers"]["x-opensms-signature"],
+            self.signature_for("override-secret", request["body"]),
+        )
+
+    def test_a_failed_delivery_reports_the_http_status_and_error(self):
+        self.target.queue_statuses(500)
+        raw_key = self.add_api_key()
+
+        response = self.post_test(raw_key, {"url": self.target.url})
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json(), {
+            "ok": False,
+            "http_status": 500,
+            "error": "HTTP 500",
+        })
+
+    def test_a_redirect_counts_as_a_failure(self):
+        self.target.queue_statuses(302)
+        raw_key = self.add_api_key()
+
+        response = self.post_test(raw_key, {"url": self.target.url})
+
+        self.assertEqual(response.status_code, 502)
+        body = response.json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["http_status"], 302)
+        self.assertTrue(body["error"])
+        # The redirect must not be followed, so only the original POST arrived.
+        self.assertEqual(self.target.count, 1)
+
+    def test_an_unreachable_target_reports_no_http_status(self):
+        raw_key = self.add_api_key()
+
+        response = self.post_test(
+            raw_key, {"url": "http://127.0.0.1:1/unreachable"}
+        )
+
+        self.assertEqual(response.status_code, 502)
+        body = response.json()
+        self.assertFalse(body["ok"])
+        self.assertIsNone(body["http_status"])
+        self.assertTrue(body["error"])
+
+    def test_no_body_uses_the_saved_target_and_secret(self):
+        self.save_webhook(enabled=False, secret="saved-secret")
+        before = self.read_config()
+        raw_key = self.add_api_key()
+
+        response = self.post_test(raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        request = self.target.next_request()
+        self.assertEqual(
+            request["headers"]["x-opensms-signature"],
+            self.signature_for("saved-secret", request["body"]),
+        )
+        self.assertEqual(self.read_config(), before)
+
+    def test_an_override_is_used_for_the_test_only(self):
+        self.save_webhook(
+            url="http://127.0.0.1:1/unreachable", secret="saved-secret"
+        )
+        before = self.read_config()
+        raw_key = self.add_api_key()
+
+        response = self.post_test(
+            raw_key, {"url": self.target.url, "secret": "override-secret"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        request = self.target.next_request()
+        self.assertEqual(
+            request["headers"]["x-opensms-signature"],
+            self.signature_for("override-secret", request["body"]),
+        )
+        self.assertEqual(self.read_config(), before)
+
+        # The next test without a body uses the saved target again.
+        response = self.post_test(raw_key, {"url": self.target.url})
+        self.assertEqual(response.status_code, 200)
+        request = self.target.next_request()
+        self.assertEqual(
+            request["headers"]["x-opensms-signature"],
+            self.signature_for("saved-secret", request["body"]),
+        )
+
+    def test_an_empty_secret_tests_unsigned_delivery(self):
+        self.save_webhook(secret="saved-secret")
+        raw_key = self.add_api_key()
+
+        response = self.post_test(
+            raw_key, {"url": self.target.url, "secret": ""}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        request = self.target.next_request()
+        self.assertNotIn("x-opensms-signature", request["headers"])
+        self.assertEqual(
+            self.read_config()["webhook"]["secret"], "saved-secret"
+        )
+
+    def test_an_error_never_echoes_the_target_with_credentials(self):
+        raw_key = self.add_api_key()
+
+        response = self.post_test(raw_key, {
+            "url": (
+                "http://proxy-user:proxy-pass@127.0.0.1:1/"
+                "pa th?token=SENSITIVE-TOKEN"
+            ),
+        })
+
+        self.assertEqual(response.status_code, 502)
+        body = response.json()
+        self.assertFalse(body["ok"])
+        self.assertIsNone(body["http_status"])
+        self.assertTrue(body["error"])
+        for sensitive in (
+            "proxy-user",
+            "proxy-pass",
+            "SENSITIVE-TOKEN",
+            "/pa th",
+        ):
+            with self.subTest(sensitive=sensitive):
+                self.assertNotIn(sensitive, response.text)
+
+    def test_a_test_needs_a_valid_target(self):
+        raw_key = self.add_api_key()
+
+        cases = {
+            "no saved target": None,
+            "empty override": {"url": ""},
+            "not a url": {"url": "not-a-url"},
+            "not http": {"url": "ftp://proxy.example.lan/hooks"},
+            "no host": {"url": "http:///hooks"},
+        }
+        for name, payload in cases.items():
+            with self.subTest(name):
+                response = self.post_test(raw_key, payload)
+
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertIsInstance(response.json()["detail"], str)
+
+        self.assertEqual(self.target.count, 0)
+
+    def test_the_saved_timeout_is_used(self):
+        self.save_webhook(timeout=7)
+        raw_key = self.add_api_key()
+        calls = []
+
+        def record(config, timeout):
+            calls.append((config, timeout))
+            return True, 204, None
+
+        with mock.patch.object(
+            postApi.webhookSvc, "send_test_webhook", side_effect=record
+        ):
+            response = self.post_test(raw_key, {"url": self.target.url})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls[0][1], 7)
+
+    def test_unknown_fields_and_wrong_types_are_rejected(self):
+        raw_key = self.add_api_key()
+
+        cases = {
+            "unknown field": {"url": self.target.url, "unknown": 1},
+            "url not a string": {"url": 42},
+            "secret not a string": {"secret": 42},
+            "secret too long": {"secret": "x" * 257},
+        }
+        for name, payload in cases.items():
+            with self.subTest(name):
+                response = self.post_test(raw_key, payload)
+
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIsInstance(response.json()["detail"], str)
+
+        self.assertEqual(self.target.count, 0)
+
+    def test_a_webhook_test_requires_authentication_and_the_settings_scope(self):
+        response = self.client.post(
+            "/api/webhook/test", json={"url": self.target.url}
+        )
+        self.assertEqual(response.status_code, 403)
+
+        raw_key = self.add_api_key(scopes=("sms:write",))
+        response = self.post_test(raw_key, {"url": self.target.url})
+        self.assertEqual(response.status_code, 403)
+
+        self.assertEqual(self.target.count, 0)

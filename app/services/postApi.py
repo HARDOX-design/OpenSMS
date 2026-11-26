@@ -10,6 +10,8 @@ import json
 #from functools import partial
 
 from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import uvicorn
@@ -618,6 +620,138 @@ async def api_put_settings(
         **_settings_body(saved),
         "restart_required": _restart_required(saved),
     }
+
+WEBHOOK_TEST_FIELDS = {"url", "secret"}
+
+
+def _webhook_test_overrides(payload) -> dict:
+    """Validate a Webhook test body; an absent body means "use saved Settings"."""
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="Request body must be a JSON object",
+        )
+    unknown = set(payload) - WEBHOOK_TEST_FIELDS
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown field(s) in request: {', '.join(sorted(unknown))}",
+        )
+    overrides = {}
+    if "url" in payload:
+        if not isinstance(payload["url"], str):
+            raise HTTPException(
+                status_code=422, detail="url must be a string"
+            )
+        overrides["url"] = payload["url"]
+    if "secret" in payload:
+        secret = payload["secret"]
+        if not isinstance(secret, str):
+            raise HTTPException(
+                status_code=422, detail="secret must be a string"
+            )
+        if len(secret) > settingsSvc.SECRET_MAX_LENGTH:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "secret must be at most "
+                    f"{settingsSvc.SECRET_MAX_LENGTH} characters"
+                ),
+            )
+        overrides["secret"] = secret
+    return overrides
+
+
+def _resolve_webhook_test_config(settings: dict, overrides: dict) -> tuple:
+    """Resolve the target, secret and timeout for one test delivery.
+
+    Overrides apply to this test only; every absent field comes from the saved
+    Settings. An empty secret means unsigned delivery, whether saved or passed.
+    """
+    webhook = settings.get("webhook")
+    if not isinstance(webhook, dict):
+        webhook = {}
+    url = overrides.get("url", webhook.get("url", ""))
+    if not webhookSvc.is_valid_target(url):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A valid http(s) Webhook target is required to send a test"
+            ),
+        )
+    secret = webhook.get("secret")
+    if not isinstance(secret, str):
+        secret = ""
+    secret = overrides.get("secret", secret)
+    try:
+        timeout = float(webhook.get("timeout", webhookSvc.DEFAULT_TIMEOUT))
+    except (TypeError, ValueError):
+        timeout = webhookSvc.DEFAULT_TIMEOUT
+    return url, secret, timeout
+
+
+def _scrub_webhook_target(url: str, error: str) -> str:
+    """Remove URL parts from an error so credentials never reach the caller."""
+    if not error:
+        return error
+    candidates = {url, url.strip()}
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        parsed = None
+    if parsed is not None:
+        candidates.update({
+            parsed.username,
+            parsed.password,
+            parsed.path if parsed.path not in ("", "/") else None,
+            parsed.query or None,
+            parsed.fragment or None,
+        })
+    for sensitive in candidates:
+        if sensitive:
+            error = error.replace(sensitive, "<webhook target>")
+    return error
+
+
+@app.post("/api/webhook/test")
+async def api_webhook_test(
+    request: Request,
+    client: dict = Depends(require_scope(SCOPE_SETTINGS))
+):
+    raw_body = await request.body()
+    payload = {}
+    if raw_body:
+        try:
+            payload = json.loads(raw_body)
+        except Exception:
+            raise HTTPException(
+                status_code=422,
+                detail="Request body must be valid JSON",
+            )
+    overrides = _webhook_test_overrides(payload)
+    settings = settingsSvc.load_settings(_settings_path())
+    url, secret, timeout = _resolve_webhook_test_config(settings, overrides)
+
+    # The delivery is blocking; keep the event loop free while it runs.
+    ok, status, error = await run_in_threadpool(
+        webhookSvc.send_test_webhook,
+        {"url": url, "secret": secret},
+        timeout=timeout,
+    )
+    if ok:
+        log_activities(f"Webhook test delivered (HTTP {status})")
+        return {"ok": True, "http_status": status, "error": None}
+    if error:
+        error = _scrub_webhook_target(url, error)
+    if status is None:
+        log_activities("Webhook test failed")
+    else:
+        log_activities(f"Webhook test failed (HTTP {status})")
+    return JSONResponse(
+        status_code=502,
+        content={"ok": False, "http_status": status, "error": error},
+    )
+
 
 @app.post("/sms/")
 async def process_sms_req(
