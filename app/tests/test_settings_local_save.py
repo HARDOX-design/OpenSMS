@@ -56,6 +56,14 @@ class LocalSaveTestCase(unittest.TestCase):
         with open(self.config_path, encoding="utf-8") as config_file:
             return json.load(config_file)
 
+    def write_remote_settings(self, **webhook_overrides) -> dict:
+        current = settingsSvc.load_settings(self.config_path)
+        remote_settings = settingsSvc.writable_settings(current)
+        remote_settings["revision"] = current["revision"]
+        remote_settings["webhook"].pop("secret_set")
+        remote_settings["webhook"].update(webhook_overrides)
+        return settingsSvc.save_settings(self.config_path, remote_settings)
+
     def tmp_files(self) -> list:
         return glob.glob(os.path.join(self.tmp.name, "*.tmp"))
 
@@ -202,24 +210,76 @@ class LocalSaveMergeTests(LocalSaveTestCase):
         self.assertEqual(saved["webhook"]["capacity"], 100)
 
 
+class StaleSettingsFormRegressionTests(LocalSaveTestCase):
+
+    def test_saving_a_stale_form_preserves_remote_target_and_retry_policy(self):
+        # The screen snapshots only edited fields before the remote write. It
+        # is not reloaded before this stale form is saved.
+        stale_form = {"port": 9393}
+        self.write_remote_settings(
+            url="https://remote-after-open.example.lan/hooks/opensms",
+            timeout=11,
+            max_attempts=6,
+            backoff=[2, 4, 8],
+            capacity=300,
+        )
+
+        saved = settingsSvc.save_local_settings(self.config_path, stale_form)
+
+        self.assertEqual(saved["revision"], 5)
+        self.assertEqual(saved["port"], 9393)
+        webhook = saved["webhook"]
+        self.assertEqual(
+            webhook["url"], "https://remote-after-open.example.lan/hooks/opensms"
+        )
+        self.assertEqual(webhook["timeout"], 11)
+        self.assertEqual(webhook["max_attempts"], 6)
+        self.assertEqual(webhook["backoff"], [2, 4, 8])
+        self.assertEqual(webhook["capacity"], 300)
+        self.assertEqual(webhook["secret"], "remote-secret")
+        self.assertEqual(saved["unknown_top_level"], "internal")
+        self.assertEqual(webhook["unknown_webhook"], "internal")
+        self.assertEqual(self.read_config(), saved)
+        self.assertEqual(self.tmp_files(), [])
+
+    def test_an_invalid_stale_form_rejects_the_whole_save(self):
+        stale_form = {"port": settingsSvc.PORT_MIN - 1}
+        self.write_remote_settings(
+            url="https://remote-after-open.example.lan/hooks/opensms",
+            timeout=11,
+        )
+        before = self.read_config()
+
+        with self.assertRaises(settingsSvc.SettingsValidationError):
+            settingsSvc.save_local_settings(self.config_path, stale_form)
+
+        self.assertEqual(self.read_config(), before)
+        self.assertEqual(before["revision"], 4)
+        self.assertEqual(
+            before["webhook"]["url"],
+            "https://remote-after-open.example.lan/hooks/opensms",
+        )
+        self.assertEqual(before["webhook"]["timeout"], 11)
+        self.assertEqual(before["unknown_top_level"], "internal")
+        self.assertEqual(before["webhook"]["unknown_webhook"], "internal")
+        self.assertEqual(self.tmp_files(), [])
+
+
 class PermissionConfirmationSaveTests(LocalSaveTestCase):
     def test_permission_confirmation_preserves_a_remote_write_after_a_stale_read(self):
         stored_settings = self.stored_config()
         stored_settings["permissions"] = False
         self.write_config(stored_settings)
         stale = settingsSvc.load_settings(self.config_path)
-        remote = settingsSvc.writable_settings(stale)
-        remote["revision"] = stale["revision"]
-        remote["webhook"].pop("secret_set")
-        remote["webhook"].update({
-            "url": "https://remote-after-open.example.lan/hooks/opensms",
-            "secret": "remote-after-open-secret",
-            "timeout": 11,
-            "max_attempts": 6,
-            "backoff": [2, 4, 8],
-            "capacity": 300,
-        })
-        settingsSvc.save_settings(self.config_path, remote)
+        self.assertEqual(stale["revision"], 3)
+        self.write_remote_settings(
+            url="https://remote-after-open.example.lan/hooks/opensms",
+            secret="remote-after-open-secret",
+            timeout=11,
+            max_attempts=6,
+            backoff=[2, 4, 8],
+            capacity=300,
+        )
 
         saved = settingsSvc.save_local_settings(
             self.config_path, {"permissions": True}
