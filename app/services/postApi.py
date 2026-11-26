@@ -34,20 +34,63 @@ platform = get_os_platform()
 logger = None
 sms_api = SmsCrossPlatform()
 
+# Test seam: tests point the API at a temporary config directory so they never
+# read or write the real app data directory.
+_config_dir: str | None = None
+_runtime: dict = {}
+_last_restart_at: float | None = None
+_started_at: float | None = None
+
 ## OS specific setups
 # for android
 if platform == "android":
     from android.storage import app_storage_path
     from jnius import autoclass
-    base_path = app_storage_path()
 #for other platforms like windows or linux
 else:
     from services.serialMgr import SerialConDesktop
     from services.pathMgr import get_user_data_dir
-    base_path = get_user_data_dir(app_name)
     serial_mgr = SerialConDesktop()
 
-config_dir = join(base_path, 'config')
+def _default_config_dir() -> str:
+    if platform == "android":
+        base_path = app_storage_path()
+    else:
+        base_path = get_user_data_dir(app_name)
+    return join(base_path, "config")
+
+def get_config_dir() -> str:
+    """Return the config directory, resolving the platform default lazily."""
+    if _config_dir:
+        return _config_dir
+    return _default_config_dir()
+
+def set_config_dir(path: str | None):
+    """Point config reads and writes at `path`; None restores the default."""
+    global _config_dir
+    _config_dir = str(path) if path else None
+
+def set_runtime_providers(providers: dict | None = None):
+    """Replace the live runtime value providers (callables keyed by name)."""
+    _runtime.clear()
+    if providers:
+        _runtime.update(providers)
+
+def get_runtime_provider(name: str, default=None):
+    provider = _runtime.get(name)
+    if provider is None:
+        return default
+    try:
+        return provider()
+    except Exception:
+        return default
+
+def reset_runtime_state():
+    """Test seam: forget runtime providers and restart/uptime bookkeeping."""
+    global _last_restart_at, _started_at
+    set_runtime_providers({})
+    _last_restart_at = None
+    _started_at = None
 
 ## Functions
 
@@ -89,6 +132,9 @@ def hash_api_key(raw_key: str) -> str:
     """Hash the raw key using SHA-256."""
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
+def _keys_path() -> str:
+    return join(get_config_dir(), "keys.json")
+
 def generate_new_api_key() -> str:
     # Generate a high-entropy secret token
     new_raw_key = secrets.token_urlsafe(32)
@@ -101,15 +147,14 @@ def generate_new_api_key() -> str:
             "scopes": ["sms:write"]
         }
     }
-    keys_path = join(config_dir, "keys.json")
-    with open(keys_path, "w") as kf:
+    with open(_keys_path(), "w") as kf:
         json.dump(app_api_keys, kf)
     print("Created/updated the API key")
     log_activities("Created/updated the API key")
     return new_raw_key
 
 def get_api_keys() -> dict:
-    keys_path = join(config_dir, "keys.json")
+    keys_path = _keys_path()
     api_keys = {}
     if exists(keys_path):
         with open(keys_path, "r") as kf:
