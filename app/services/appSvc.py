@@ -94,9 +94,12 @@ webhook_dispatcher = WebhookDispatcher(
     status_path=webhook_status_file,
     log=log_activities,
 )
-# Let the API compare a saved port with the one the live server is bound to.
+# Let the API report live facts: the port the server is bound to, whether it is
+# running, and how many Webhooks are waiting in the Outbox.
 set_runtime_providers({
+    "running": lambda: app_api_server.bound_port is not None,
     "bound_port": lambda: app_api_server.bound_port,
+    "outbox_pending": lambda: webhook_dispatcher.pending_count(),
 })
 
 ## functions

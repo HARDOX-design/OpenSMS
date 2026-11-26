@@ -1,4 +1,5 @@
 import glob
+import json
 import os
 import threading
 import time
@@ -63,6 +64,280 @@ class HealthTests(ApiTestCase):
         self.assertEqual(body["version"], __version__)
         self.assertEqual(body["platform"], get_os_platform())
         self.assertGreaterEqual(body["uptime_s"], 9)
+
+
+class StatusTests(ApiTestCase):
+
+    def config(self, **overrides) -> dict:
+        config = {
+            "app": "opensms",
+            "port": 9393,
+            "boot": True,
+            "permissions": True,
+            "revision": 5,
+            "webhook": {
+                "enabled": False,
+                "url": "",
+                "secret": "",
+                "timeout": 10,
+                "max_attempts": 3,
+                "backoff": [5, 30],
+                "capacity": 100,
+            },
+        }
+        webhook_overrides = overrides.pop("webhook", None)
+        if webhook_overrides:
+            config["webhook"].update(webhook_overrides)
+        config.update(overrides)
+        return config
+
+    def write_json(self, name: str, value):
+        with open(
+            os.path.join(self.config_dir, name), "w", encoding="utf-8"
+        ) as json_file:
+            json.dump(value, json_file)
+
+    def status(self, raw_key: str):
+        return self.client.get("/api/status", headers=self.auth(raw_key))
+
+    def warning_codes(self, body: dict) -> list:
+        return [warning["code"] for warning in body["warnings"]]
+
+    def test_status_refuses_a_missing_or_invalid_key(self):
+        response = self.client.get("/api/status")
+        self.assertEqual(response.status_code, 403)
+
+        self.add_api_key()
+        response = self.client.get(
+            "/api/status", headers=self.auth("osms_not_a_real_key")
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_status_requires_the_settings_scope(self):
+        raw_key = self.add_api_key(scopes=("sms:write",))
+
+        response = self.status(raw_key)
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_status_separates_the_configured_and_bound_ports(self):
+        self.write_config(self.config(port=9393))
+        postApi.set_runtime_providers({
+            "running": lambda: True,
+            "port": lambda: 9292,
+            "bound_port": lambda: 9292,
+        })
+        raw_key = self.add_api_key()
+
+        response = self.status(raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["version"], __version__)
+        self.assertEqual(body["config"], {
+            "port": 9393,
+            "boot": True,
+            "revision": 5,
+        })
+        self.assertTrue(body["api"]["running"])
+        self.assertEqual(body["api"]["port"], 9292)
+        self.assertEqual(body["api"]["bound_port"], 9292)
+
+    def test_missing_runtime_values_are_null_not_invented(self):
+        postApi.set_runtime_providers({})
+        raw_key = self.add_api_key()
+
+        body = self.status(raw_key).json()
+
+        self.assertIsNone(body["api"]["bound_port"])
+        self.assertIsNone(body["webhook"]["outbox_pending"])
+        self.assertIsNone(body["webhook"]["last_delivery"])
+
+    def test_status_reports_service_transitions_and_unknowns(self):
+        self.write_json("resp.json", {
+            "server": "started",
+            "serial": "none",
+            "provider": "test-network",
+        })
+        raw_key = self.add_api_key()
+
+        body = self.status(raw_key).json()
+        self.assertEqual(body["service"], {
+            "server": "started",
+            "serial": "none",
+            "provider": "test-network",
+        })
+
+        with open(
+            os.path.join(self.config_dir, "resp.json"), "w", encoding="utf-8"
+        ) as resp_file:
+            resp_file.write("not json")
+
+        body = self.status(raw_key).json()
+        self.assertEqual(body["service"], {
+            "server": "unknown",
+            "serial": "unknown",
+            "provider": "unknown",
+        })
+
+    def test_status_reports_network_interfaces(self):
+        postApi.set_runtime_providers({
+            "network_ips": lambda: {
+                "wifi": [
+                    {"interface": "wlan0", "ip": "192.168.1.50"},
+                ],
+                "ethernet": [
+                    {"interface": "eth0", "ip": "10.0.0.2"},
+                ],
+            },
+        })
+        raw_key = self.add_api_key()
+
+        body = self.status(raw_key).json()
+
+        self.assertEqual(body["network"], {
+            "wifi": [{"interface": "wlan0", "ip": "192.168.1.50"}],
+            "ethernet": [{"interface": "eth0", "ip": "10.0.0.2"}],
+        })
+        self.assertNotIn("network_unavailable", self.warning_codes(body))
+
+    def test_network_failure_is_an_empty_list_and_a_warning(self):
+        def fail():
+            raise RuntimeError("no network facts")
+
+        postApi.set_runtime_providers({"network_ips": fail})
+        raw_key = self.add_api_key()
+
+        response = self.status(raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["network"], {"wifi": [], "ethernet": []})
+        self.assertIn("network_unavailable", self.warning_codes(body))
+
+    def test_status_reports_the_last_delivery_attempt_and_outbox_depth(self):
+        self.write_config(self.config(
+            webhook={
+                "enabled": True,
+                "url": "https://proxy.example.lan/hooks/opensms",
+                "capacity": 100,
+            },
+        ))
+        self.write_json("webhook_status.json", {
+            "ok": False,
+            "event": "sms.received",
+            "delivery_id": "d-1",
+            "http_status": 500,
+            "attempts": 3,
+            "error": "HTTP 500",
+            "at": "2026-11-26T12:34:56+00:00",
+        })
+        postApi.set_runtime_providers({"outbox_pending": lambda: 3})
+        raw_key = self.add_api_key()
+
+        body = self.status(raw_key).json()
+
+        self.assertEqual(body["webhook"]["outbox_pending"], 3)
+        self.assertEqual(body["webhook"]["outbox_capacity"], 100)
+        self.assertEqual(body["webhook"]["last_delivery"], {
+            "ok": False,
+            "event": "sms.received",
+            "delivery_id": "d-1",
+            "http_status": 500,
+            "attempts": 3,
+            "error": "HTTP 500",
+            "at": "2026-11-26T12:34:56+00:00",
+        })
+
+    def test_an_unreadable_delivery_status_is_null(self):
+        with open(
+            os.path.join(self.config_dir, "webhook_status.json"),
+            "w",
+            encoding="utf-8",
+        ) as status_file:
+            status_file.write("not json")
+        raw_key = self.add_api_key()
+
+        body = self.status(raw_key).json()
+
+        self.assertIsNone(body["webhook"]["last_delivery"])
+
+    def test_status_reports_only_the_webhook_host_and_secret_presence(self):
+        self.write_config(self.config(
+            webhook={
+                "enabled": True,
+                "url": (
+                    "http://proxy-user:proxy-pass@proxy.example.lan:8080/"
+                    "hooks/SENSITIVE-PATH?token=SENSITIVE-TOKEN"
+                ),
+                "secret": "SENSITIVE-SECRET",
+            },
+        ))
+        raw_key = self.add_api_key()
+
+        response = self.status(raw_key)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["webhook"]["url_host"], "proxy.example.lan")
+        self.assertTrue(body["webhook"]["secret_set"])
+        for sensitive in (
+            "SENSITIVE-PATH",
+            "SENSITIVE-TOKEN",
+            "SENSITIVE-SECRET",
+            "proxy-user",
+            "proxy-pass",
+            "/hooks",
+            "/hook",
+        ):
+            with self.subTest(sensitive=sensitive):
+                self.assertNotIn(sensitive, response.text)
+
+    def test_forwarding_disabled_warns_that_new_inbound_sms_are_discarded(self):
+        raw_key = self.add_api_key()
+
+        body = self.status(raw_key).json()
+
+        self.assertFalse(body["webhook"]["enabled"])
+        self.assertIn("webhook_disabled", self.warning_codes(body))
+        warning = next(
+            warning for warning in body["warnings"]
+            if warning["code"] == "webhook_disabled"
+        )
+        self.assertIn("new Inbound SMS", warning["message"])
+        self.assertIn("discarded", warning["message"])
+        self.assertNotIn("webhook_url_invalid", self.warning_codes(body))
+
+    def test_an_enabled_but_invalid_target_is_a_warning(self):
+        self.write_config(self.config(
+            webhook={"enabled": True, "url": "not-a-url"},
+        ))
+        raw_key = self.add_api_key()
+
+        body = self.status(raw_key).json()
+
+        self.assertIn("webhook_url_invalid", self.warning_codes(body))
+        self.assertNotIn("webhook_disabled", self.warning_codes(body))
+
+    def test_an_outbox_near_capacity_is_a_warning(self):
+        self.write_config(self.config(
+            webhook={
+                "enabled": True,
+                "url": "https://proxy.example.lan/hooks/opensms",
+                "capacity": 10,
+            },
+        ))
+        raw_key = self.add_api_key()
+
+        postApi.set_runtime_providers({"outbox_pending": lambda: 7})
+        body = self.status(raw_key).json()
+        self.assertNotIn("outbox_near_capacity", self.warning_codes(body))
+
+        postApi.set_runtime_providers({"outbox_pending": lambda: 8})
+        body = self.status(raw_key).json()
+        self.assertIn("outbox_near_capacity", self.warning_codes(body))
+        self.assertEqual(body["webhook"]["outbox_pending"], 8)
+        self.assertEqual(body["webhook"]["outbox_capacity"], 10)
 
 
 class SettingsReadTests(ApiTestCase):

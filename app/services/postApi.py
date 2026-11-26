@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timezone
 from threading import Thread, Lock
 from os.path import join
+from urllib.parse import urlparse
 import json
 #from functools import partial
 
@@ -18,7 +19,7 @@ from services.pathMgr import get_os_platform
 from services.smsApi import SmsCrossPlatform, clean_and_validate_phone
 from services.logSvc import LogService
 from services.config import __version__, app_name
-from services import settingsSvc
+from services import netSvc, settingsSvc, webhookSvc
 
 # OS specific
 #try:
@@ -379,6 +380,186 @@ async def api_health(
         "version": __version__,
         "platform": platform,
         "uptime_s": uptime_s,
+    }
+
+def _status_runtime(name: str, fallback=None):
+    """A runtime provider value, or `fallback` when none is registered."""
+    if name not in _runtime:
+        return fallback
+    return get_runtime_provider(name, fallback)
+
+
+def _live_server():
+    return getattr(app.state, "server", None)
+
+
+def _live_attr(name: str):
+    return getattr(_live_server(), name, None)
+
+
+def _status_uptime_s() -> int:
+    started_at = _live_attr("started_at") or _started_at
+    if not started_at:
+        return 0
+    return max(0, int(time.time() - started_at))
+
+
+def _service_status() -> dict:
+    """Read the service transition log, reporting unknown fields honestly."""
+    try:
+        with open(
+            join(get_config_dir(), "resp.json"), "r", encoding="utf-8"
+        ) as response_file:
+            resp = json.load(response_file)
+    except Exception:
+        resp = None
+    if not isinstance(resp, dict):
+        resp = {}
+    return {
+        field: (
+            resp.get(field)
+            if isinstance(resp.get(field), str) and resp.get(field)
+            else "unknown"
+        )
+        for field in ("server", "serial", "provider")
+    }
+
+
+def _network_status(warnings: list) -> dict:
+    """Return the network interface lists, or empty lists on any failure."""
+    try:
+        provider = _runtime.get("network_ips")
+        network = provider() if provider is not None else netSvc.get_network_ips()
+    except Exception:
+        network = None
+    if not isinstance(network, dict):
+        warnings.append({
+            "code": "network_unavailable",
+            "message": "Network interfaces could not be discovered.",
+        })
+        return {"wifi": [], "ethernet": []}
+
+    def entries(name: str) -> list:
+        values = network.get(name)
+        if not isinstance(values, list):
+            return []
+        return [
+            entry for entry in values
+            if isinstance(entry, dict)
+            and isinstance(entry.get("interface"), str)
+            and isinstance(entry.get("ip"), str)
+        ]
+
+    return {"wifi": entries("wifi"), "ethernet": entries("ethernet")}
+
+
+def _last_delivery(config_dir: str) -> dict | None:
+    status = webhookSvc.read_webhook_status(
+        join(config_dir, "webhook_status.json")
+    )
+    if not status:
+        return None
+    return {
+        field: status.get(field)
+        for field in (
+            "ok",
+            "event",
+            "delivery_id",
+            "http_status",
+            "attempts",
+            "error",
+            "at",
+        )
+    }
+
+
+def _webhook_status(settings: dict, config_dir: str, warnings: list) -> dict:
+    webhook = settingsSvc.writable_settings(settings)["webhook"]
+    url = webhook["url"]
+    url_host = None
+    if url:
+        try:
+            url_host = urlparse(url).hostname
+        except ValueError:
+            url_host = None
+
+    pending = _status_runtime("outbox_pending")
+    capacity = webhook["capacity"]
+    if not isinstance(capacity, int) or isinstance(capacity, bool):
+        capacity = None
+
+    if not webhook["enabled"]:
+        warnings.append({
+            "code": "webhook_disabled",
+            "message": (
+                "Webhook forwarding is disabled: new Inbound SMS are "
+                "discarded."
+            ),
+        })
+    elif not webhookSvc.is_valid_target(url):
+        warnings.append({
+            "code": "webhook_url_invalid",
+            "message": (
+                "Webhook forwarding is enabled with an invalid Webhook target."
+            ),
+        })
+
+    if (
+        isinstance(pending, int)
+        and not isinstance(pending, bool)
+        and isinstance(capacity, int)
+        and not isinstance(capacity, bool)
+        and capacity > 0
+        and pending >= 0.8 * capacity
+    ):
+        warnings.append({
+            "code": "outbox_near_capacity",
+            "message": (
+                f"The Outbox holds {pending} of {capacity} Webhooks; the "
+                "oldest will be dropped when it is full."
+            ),
+        })
+
+    return {
+        "enabled": bool(webhook["enabled"]),
+        "url_host": url_host,
+        "secret_set": bool(webhook["secret_set"]),
+        "outbox_pending": pending,
+        "outbox_capacity": capacity,
+        "last_delivery": _last_delivery(config_dir),
+    }
+
+
+@app.get("/api/status")
+async def api_status(
+    client: dict = Depends(require_scope(SCOPE_SETTINGS))
+):
+    config_dir = get_config_dir()
+    settings = settingsSvc.load_settings(_settings_path())
+    warnings: list = []
+
+    network = _network_status(warnings)
+    webhook = _webhook_status(settings, config_dir, warnings)
+
+    return {
+        "version": __version__,
+        "api": {
+            "running": bool(_status_runtime("running", True)),
+            "port": _status_runtime("port", _live_attr("port")),
+            "bound_port": _status_runtime(
+                "bound_port", _live_attr("bound_port")
+            ),
+            "uptime_s": _status_uptime_s(),
+        },
+        "service": _service_status(),
+        "config": {
+            "port": settings.get("port"),
+            "boot": settings.get("boot"),
+            "revision": settingsSvc.get_revision(settings),
+        },
+        "network": network,
+        "webhook": webhook,
+        "warnings": warnings,
     }
 
 @app.get("/api/settings")
