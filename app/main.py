@@ -40,7 +40,7 @@ from screens.mainScr import ButtonControl, EndPointUrl, DocButton, SerialCard
 from screens.settings import SettingsBox, ApiKeyTxtbox
 
 # import services
-from services.postApi import get_api_keys, generate_new_api_key
+from services.postApi import has_api_keys, generate_new_api_key
 from services.netSvc import get_network_ips
 from services.config import __version__, app_name
 from services.webhookSvc import (
@@ -245,9 +245,7 @@ class OpenSmsApp(MDApp):
             self.write_app_conf()
         port_no_inp.text = str(self.config_template["port"])
         self.refresh_webhook_view()
-        api_keys = get_api_keys()
-        if len(api_keys) >= 1:
-            self.key_exists = True
+        self.check_if_key_exists()
         self.stop_resp_loop()
         self.resp_thred = Thread(target=self.resp_check_loop, daemon=True)
         self.resp_thred.start()
@@ -509,11 +507,7 @@ class OpenSmsApp(MDApp):
         activity.startActivity(intent)
 
     def check_if_key_exists(self):
-        api_keys = get_api_keys()
-        if len(api_keys) >= 1:
-            self.key_exists = True
-        else:
-            self.key_exists = False
+        self.key_exists = has_api_keys()
         return self.key_exists
 
     def new_api_key_pop(self):

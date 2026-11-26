@@ -1,9 +1,10 @@
 import hashlib
 import secrets
 import asyncio
-from threading import Thread
-import sys
-from os.path import dirname, abspath, join, exists
+import time
+from datetime import datetime, timezone
+from threading import Thread, Lock
+from os.path import join
 import json
 #from functools import partial
 
@@ -16,7 +17,8 @@ import uvicorn
 from services.pathMgr import get_os_platform
 from services.smsApi import SmsCrossPlatform, clean_and_validate_phone
 from services.logSvc import LogService
-from services.config import app_name
+from services.config import __version__, app_name
+from services import settingsSvc
 
 # OS specific
 #try:
@@ -34,12 +36,17 @@ platform = get_os_platform()
 logger = None
 sms_api = SmsCrossPlatform()
 
+# API key scopes
+SCOPE_SEND = "sms:write"
+SCOPE_SETTINGS = "settings:write"
+
 # Test seam: tests point the API at a temporary config directory so they never
 # read or write the real app data directory.
 _config_dir: str | None = None
 _runtime: dict = {}
 _last_restart_at: float | None = None
 _started_at: float | None = None
+_key_lock = Lock()
 
 ## OS specific setups
 # for android
@@ -135,31 +142,90 @@ def hash_api_key(raw_key: str) -> str:
 def _keys_path() -> str:
     return join(get_config_dir(), "keys.json")
 
+def _settings_path() -> str:
+    return join(get_config_dir(), "config.json")
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+def _migrate_v1_keys(raw: dict) -> list:
+    """Convert a version-one {hash: {name, scopes}} store to version two.
+
+    Version-one scopes were stored but never enforced, so migration grants both
+    scopes once; otherwise every existing install would lock itself out.
+    """
+    keys = []
+    for key_hash, info in raw.items():
+        if not isinstance(info, dict):
+            continue
+        scopes = info.get("scopes")
+        if not isinstance(scopes, list):
+            scopes = []
+        scopes = {str(scope) for scope in scopes if isinstance(scope, str)}
+        scopes.update({SCOPE_SEND, SCOPE_SETTINGS})
+        keys.append({
+            "id": f"k_{secrets.token_hex(4)}",
+            "name": str(info.get("name") or "opensms"),
+            "hash": str(key_hash),
+            "scopes": sorted(scopes),
+            "created_at": _now_iso(),
+        })
+    return keys
+
+def load_key_store() -> tuple[dict, bool]:
+    """Return the key store, migrating a version-one file in memory.
+
+    The second item is True when a migration is pending persistence.
+    """
+    try:
+        with open(_keys_path(), "r", encoding="utf-8") as keys_file:
+            raw = json.load(keys_file)
+    except Exception:
+        return {"version": 2, "keys": []}, False
+    if not isinstance(raw, dict):
+        return {"version": 2, "keys": []}, False
+    if raw.get("version") == 2 and isinstance(raw.get("keys"), list):
+        keys = [entry for entry in raw["keys"] if isinstance(entry, dict)]
+        return {"version": 2, "keys": keys}, False
+    return {"version": 2, "keys": _migrate_v1_keys(raw)}, True
+
+def save_key_store(store: dict):
+    settingsSvc.atomic_write_json(_keys_path(), store)
+
+def authenticate_key(raw_key: str) -> dict | None:
+    hashed = hash_api_key(raw_key)
+    with _key_lock:
+        store, migrated = load_key_store()
+        match = None
+        for entry in store["keys"]:
+            if secrets.compare_digest(entry.get("hash") or "", hashed):
+                match = entry
+        if match is not None and migrated:
+            save_key_store(store)
+    return match
+
+def has_api_keys() -> bool:
+    store, _ = load_key_store()
+    return bool(store["keys"])
+
 def generate_new_api_key() -> str:
     # Generate a high-entropy secret token
-    new_raw_key = secrets.token_urlsafe(32)
-    new_raw_key = f"osms_{new_raw_key}"
-    # Hash and store in your DB
-    new_hashed_key = hash_api_key(new_raw_key)
-    app_api_keys = {
-        new_hashed_key: {
+    new_raw_key = f"osms_{secrets.token_urlsafe(32)}"
+    save_key_store({
+        "version": 2,
+        "keys": [{
+            "id": f"k_{secrets.token_hex(4)}",
             "name": "opensms",
-            "scopes": ["sms:write"]
-        }
-    }
-    with open(_keys_path(), "w") as kf:
-        json.dump(app_api_keys, kf)
+            "hash": hash_api_key(new_raw_key),
+            "scopes": sorted({SCOPE_SEND, SCOPE_SETTINGS}),
+            "created_at": _now_iso(),
+        }],
+    })
     print("Created/updated the API key")
     log_activities("Created/updated the API key")
     return new_raw_key
 
-def get_api_keys() -> dict:
-    keys_path = _keys_path()
-    api_keys = {}
-    if exists(keys_path):
-        with open(keys_path, "r") as kf:
-            api_keys = json.load(kf)
-    return api_keys
+
 
 # data formatting for request
 class SmsData(BaseModel):
@@ -175,7 +241,7 @@ class ControlData(BaseModel):
 
 # FastAPI app
 app = FastAPI()
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 # api server class with callback function
 class PosiApiServer:
@@ -186,6 +252,7 @@ class PosiApiServer:
         self.kivyCallback = None
         self.server: uvicorn.Server | None = None
         self.thread: Thread | None = None
+        self.started_at: float | None = None
 
     # ----------------------------
     # Control callback
@@ -211,9 +278,11 @@ class PosiApiServer:
             log_level="info",
             loop="asyncio"
         )
+        global _started_at
         try:
             self.server = uvicorn.Server(config)
             app.state.server = self  # attach instance
+            _started_at = self.started_at = time.time()
             asyncio.run(self.server.serve())
         except OSError as e:
             err_msg = f"Error while port binding {final_port}: {e}"
@@ -264,21 +333,16 @@ class PosiApiServer:
 
 async def verify_api_key(
     request: Request,
-    credentials: HTTPAuthorizationCredentials = Depends(security)
+    credentials: HTTPAuthorizationCredentials | None = Depends(security)
 ) -> dict:
     client_ip = request.client.host if request.client else "unknown"
-    raw_token = credentials.credentials
-    hashed_token = hash_api_key(raw_token)
-
-    # 1. Lookup candidate in DB by hash
-    app_api_keys = get_api_keys()
-    client_info = app_api_keys.get(hashed_token)
-
-    # 2. Timing-safe comparison against stored hash
-    if not client_info or not secrets.compare_digest(
-        hashed_token,
-        hash_api_key(raw_token)
-    ):
+    if credentials is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Not authenticated",
+        )
+    client_info = authenticate_key(credentials.credentials)
+    if not client_info:
         print(f"Authentication failed from IP: {client_ip}")
         log_activities(f"Authentication failed from IP: {client_ip}")
         raise HTTPException(
@@ -287,11 +351,47 @@ async def verify_api_key(
         )
     return client_info
 
+def require_scope(scope: str):
+    async def scope_guard(
+        client: dict = Depends(verify_api_key)
+    ) -> dict:
+        if scope not in (client.get("scopes") or []):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Missing required scope: {scope}",
+            )
+        return client
+    return scope_guard
+
+@app.get("/api/health")
+async def api_health(
+    client: dict = Depends(require_scope(SCOPE_SETTINGS))
+):
+    server = getattr(app.state, "server", None)
+    started_at = getattr(server, "started_at", None) or _started_at
+    uptime_s = max(0, int(time.time() - started_at)) if started_at else 0
+    return {
+        "status": "ok",
+        "version": __version__,
+        "platform": platform,
+        "uptime_s": uptime_s,
+    }
+
+@app.get("/api/settings")
+async def api_get_settings(
+    client: dict = Depends(require_scope(SCOPE_SETTINGS))
+):
+    settings = settingsSvc.load_settings(_settings_path())
+    return {
+        "revision": settingsSvc.get_revision(settings),
+        "settings": settingsSvc.writable_settings(settings),
+    }
+
 @app.post("/sms/")
 async def process_sms_req(
     item: SmsData,
     request: Request,
-    client: dict = Depends(verify_api_key)
+    client: dict = Depends(require_scope(SCOPE_SEND))
 ):
     server: PosiApiServer = request.app.state.server
 
