@@ -30,8 +30,18 @@ def get_internet_iface_ips():
 
     return ip_addresses
 
-def get_network_ips():
-    lan_ips = {"wifi": [], "ethernet": []}
+def get_network_ips(
+    *, strict: bool = False
+) -> dict[str, list[dict[str, str]]]:
+    """Discover LAN interfaces, optionally raising when discovery fails.
+
+    The UI keeps the historical empty-list fallback. Status uses strict mode so
+    a failed discovery is not mistaken for a successful discovery of no addresses.
+    """
+    lan_ips: dict[str, list[dict[str, str]]] = {
+        "wifi": [],
+        "ethernet": [],
+    }
     try:
         if platform == "android":
             from jnius import autoclass
@@ -65,6 +75,8 @@ def get_network_ips():
 
     except Exception as e:
        print(f"Error in fetching IPs: {e}")
+       if strict:
+           raise
 
     return lan_ips
 

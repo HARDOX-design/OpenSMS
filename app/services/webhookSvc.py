@@ -9,6 +9,7 @@ import hmac
 import json
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -16,7 +17,7 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from urllib import error as urlerror
 from urllib import request as urlrequest
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse, urlunparse
 
 from services.config import __version__
 
@@ -24,11 +25,28 @@ from services.config import __version__
 EVENT_INBOUND = "sms.received"
 EVENT_TEST = "webhook.test"
 
+_WEBHOOK_URL_IN_ERROR = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+_INVALID_TARGET_ERROR = (
+    "Webhook target must be a valid http(s) URL without credentials"
+)
+VALID_TARGET_SCHEMES = ("http", "https")
+
 # Delivery semantics (see docs/adr/0001-inbound-sms-webhook.md)
 DEFAULT_TIMEOUT = 10
 DEFAULT_BACKOFF = (5, 30)
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_CAPACITY = 100
+
+# Live Settings ranges, shared with the API validator in settingsSvc.
+TIMEOUT_MIN = 1
+TIMEOUT_MAX = 60
+MAX_ATTEMPTS_MIN = 1
+MAX_ATTEMPTS_MAX = 50
+BACKOFF_MIN_COUNT = 1
+BACKOFF_MAX_COUNT = 8
+BACKOFF_MAX_SECONDS = 3600
+CAPACITY_MIN = 10
+CAPACITY_MAX = 5000
 
 ## Config
 
@@ -37,33 +55,159 @@ def default_webhook_config() -> dict:
         "enabled": False,
         "url": "",
         "secret": "",
+        "timeout": DEFAULT_TIMEOUT,
+        "max_attempts": DEFAULT_MAX_ATTEMPTS,
+        "backoff": list(DEFAULT_BACKOFF),
+        "capacity": DEFAULT_CAPACITY,
     }
 
+def _int_setting(value, default: int, low: int, high: int) -> int:
+    """Return `value` when it is an in-range JSON integer, else `default`."""
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and low <= value <= high
+    ):
+        return value
+    return default
+
+def _backoff_setting(value) -> list:
+    if not isinstance(value, list) or not (
+        BACKOFF_MIN_COUNT <= len(value) <= BACKOFF_MAX_COUNT
+    ):
+        return list(DEFAULT_BACKOFF)
+    normalized = []
+    for wait_for in value:
+        if (
+            not isinstance(wait_for, int)
+            or isinstance(wait_for, bool)
+            or wait_for < 1
+            or wait_for > BACKOFF_MAX_SECONDS
+        ):
+            return list(DEFAULT_BACKOFF)
+        normalized.append(wait_for)
+    return normalized
+
 def normalize_webhook_config(raw: dict | None) -> dict:
+    """Normalize the Webhook object, falling back to today's constants.
+
+    A missing or invalid retry value must never crash the dispatcher; the
+    value simply behaves as the constant it replaced.
+    """
     config = default_webhook_config()
     if isinstance(raw, dict):
         config["enabled"] = bool(raw.get("enabled", False))
         config["url"] = str(raw.get("url") or "").strip()
         config["secret"] = str(raw.get("secret") or "")
+        config["timeout"] = _int_setting(
+            raw.get("timeout"), DEFAULT_TIMEOUT, TIMEOUT_MIN, TIMEOUT_MAX
+        )
+        config["max_attempts"] = _int_setting(
+            raw.get("max_attempts"),
+            DEFAULT_MAX_ATTEMPTS,
+            MAX_ATTEMPTS_MIN,
+            MAX_ATTEMPTS_MAX,
+        )
+        config["backoff"] = _backoff_setting(raw.get("backoff"))
+        config["capacity"] = _int_setting(
+            raw.get("capacity"), DEFAULT_CAPACITY, CAPACITY_MIN, CAPACITY_MAX
+        )
     return config
 
-def get_webhook_config(config_path: str) -> dict:
-    """Read the current webhook config from the app config file (hot reload)."""
+def get_webhook_config(
+    config_path: str, fallback: dict | None = None
+) -> dict:
+    """Read the current webhook config from the app config file (hot reload).
+
+    ``fallback`` is used only when the config file is absent, such as before
+    the on-device Settings screen has written it for the first time. An
+    unreadable or malformed file keeps the dispatcher-owned defaults.
+    """
+    if not config_path:
+        return normalize_webhook_config(fallback)
     try:
         with open(config_path, "r", encoding="utf-8") as cf:
             app_config = json.load(cf)
+    except FileNotFoundError:
+        return normalize_webhook_config(fallback)
     except Exception:
+        return default_webhook_config()
+    if not isinstance(app_config, dict):
         return default_webhook_config()
     return normalize_webhook_config(app_config.get("webhook"))
 
-def is_valid_target(url: str) -> bool:
+def _parse_target(url: str) -> ParseResult | None:
     if not isinstance(url, str):
+        return None
+    try:
+        return urlparse(url.strip())
+    except ValueError:
+        return None
+
+
+def _parsed_has_credentials(parsed: ParseResult) -> bool:
+    return parsed.username is not None or parsed.password is not None
+
+
+def _malformed_authority_has_credentials(url: str) -> bool:
+    """Detect userinfo even when urlparse rejects the authority."""
+    scheme, separator, remainder = url.strip().partition("://")
+    if not separator or scheme.lower() not in VALID_TARGET_SCHEMES:
+        return False
+    for delimiter in ("/", "?", "#"):
+        remainder = remainder.split(delimiter, 1)[0]
+    return "@" in remainder
+
+
+def has_target_credentials(url: str) -> bool:
+    """Whether an HTTP(S) target carries URL userinfo, even an empty value."""
+    parsed = _parse_target(url)
+    if parsed is not None:
+        return _parsed_has_credentials(parsed)
+    return isinstance(url, str) and _malformed_authority_has_credentials(url)
+
+
+def redact_target_credentials(url: str) -> str:
+    """Return a display-safe target without echoing URL userinfo.
+
+    The persisted value is not changed. A malformed value is omitted rather
+    than risking the echo of credentials that cannot be parsed reliably.
+    """
+    parsed = _parse_target(url)
+    if parsed is None:
+        return ""
+    if not _parsed_has_credentials(parsed):
+        return url
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def target_host(url: str) -> str | None:
+    """Return only the parsed host, never userinfo, path, query, or fragment."""
+    parsed = _parse_target(url)
+    if parsed is None:
+        return None
+    try:
+        return parsed.hostname
+    except ValueError:
+        return None
+
+
+def is_valid_target(url: str) -> bool:
+    parsed = _parse_target(url)
+    if (
+        parsed is None
+        or parsed.scheme not in VALID_TARGET_SCHEMES
+        or _parsed_has_credentials(parsed)
+    ):
         return False
     try:
-        parsed = urlparse(url.strip())
+        if not parsed.hostname:
+            return False
+        parsed.port  # raises ValueError for a non-numeric or out-of-range port
     except ValueError:
         return False
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    return True
 
 ## Payload
 
@@ -158,6 +302,8 @@ _opener = urlrequest.build_opener(_NoRedirect())
 
 def post_json(url: str, body: bytes, headers: dict, timeout: float) -> tuple:
     """POST once. Returns (ok, http_status, error_message)."""
+    if not is_valid_target(url):
+        return False, None, _INVALID_TARGET_ERROR
     try:
         req = urlrequest.Request(url, data=body, headers=headers, method="POST")
     except Exception as exc:
@@ -195,6 +341,17 @@ def read_webhook_status(status_path: str) -> dict | None:
     except Exception:
         return None
 
+def scrub_webhook_error(error: str) -> str:
+    """Remove credentialed target URLs from human-readable delivery errors."""
+    def replace(match: re.Match[str]) -> str:
+        target = match.group(0)
+        if has_target_credentials(target):
+            return "<webhook target>"
+        return target
+
+    return _WEBHOOK_URL_IN_ERROR.sub(replace, error)
+
+
 def format_webhook_status(status: dict | None) -> str:
     if not status:
         return "No deliveries yet"
@@ -202,6 +359,8 @@ def format_webhook_status(status: dict | None) -> str:
     if status.get("ok"):
         return f"Last delivery: delivered (HTTP {status.get('http_status')}) at {when}"
     error = status.get("error") or "failed"
+    if isinstance(error, str):
+        error = scrub_webhook_error(error)
     if error == "webhook disabled":
         return f"Last delivery: not sent (webhook disabled) at {when}"
     attempts = status.get("attempts", 0)
@@ -261,18 +420,26 @@ class WebhookDispatcher:
         outbox_path: str,
         status_path: str,
         log=None,
-        timeout: float = DEFAULT_TIMEOUT,
-        backoff: tuple = DEFAULT_BACKOFF,
-        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-        capacity: int = DEFAULT_CAPACITY,
+        timeout: float | None = None,
+        backoff: tuple | None = None,
+        max_attempts: int | None = None,
+        capacity: int | None = None,
     ):
+        # `None` means "read the live Settings value on each use"; an explicit
+        # value is a test override and always wins, as it did before.
         self.config_path = config_path
         self.outbox_path = outbox_path
         self.status_path = status_path
-        self.timeout = timeout
-        self.backoff = tuple(backoff)
-        self.max_attempts = max(1, int(max_attempts))
-        self.capacity = max(1, int(capacity))
+        self._timeout_override = timeout
+        self._backoff_override = (
+            tuple(backoff) if backoff is not None else None
+        )
+        self._max_attempts_override = (
+            max(1, int(max_attempts)) if max_attempts is not None else None
+        )
+        self._capacity_override = (
+            max(1, int(capacity)) if capacity is not None else None
+        )
         self.log = log or (lambda message: None)
         self._queue = queue.Queue()
         self._lock = threading.Lock()
@@ -285,6 +452,31 @@ class WebhookDispatcher:
             daemon=True,
         )
         self._thread.start()
+
+    ## Live Settings
+
+    @staticmethod
+    def _override_or_live(override, live_value):
+        """An explicit constructor override always wins over live Settings."""
+        return live_value if override is None else override
+
+    def _timeout_for(self, config: dict) -> float:
+        return self._override_or_live(self._timeout_override, config["timeout"])
+
+    def _backoff_for(self, config: dict) -> tuple:
+        return self._override_or_live(
+            self._backoff_override, tuple(config["backoff"])
+        )
+
+    def _max_attempts_for(self, config: dict) -> int:
+        return self._override_or_live(
+            self._max_attempts_override, config["max_attempts"]
+        )
+
+    def _capacity_for(self, config: dict) -> int:
+        return self._override_or_live(
+            self._capacity_override, config["capacity"]
+        )
 
     ## Outbox
 
@@ -327,7 +519,8 @@ class WebhookDispatcher:
             "attempts": 0,
         }
         with self._lock:
-            while len(self._outbox) >= self.capacity:
+            capacity = self._capacity_for(config)
+            while len(self._outbox) >= capacity:
                 dropped_id, dropped = self._outbox.popitem(last=False)
                 self.log(
                     f"Webhook outbox full, dropped {dropped.get('event')} "
@@ -387,32 +580,40 @@ class WebhookDispatcher:
         """Attempt delivery. Returns (ok, status, error, interrupted)."""
         status = None
         error = None
-        attempts_done = int(record.get("attempts") or 0)
-        if attempts_done >= self.max_attempts:
-            return False, None, "retry limit reached", False
-        for attempt in range(attempts_done + 1, self.max_attempts + 1):
+        attempt = int(record.get("attempts") or 0) + 1
+        while True:
             if self._stop.is_set():
                 return False, status, "dispatcher stopped", True
             config = get_webhook_config(self.config_path)
             if not config["enabled"]:
                 return False, status, "webhook disabled", False
+            target = record.get("url")
+            if not isinstance(target, str) or not is_valid_target(target):
+                return False, status, _INVALID_TARGET_ERROR, False
+            max_attempts = self._max_attempts_for(config)
+            if attempt > max_attempts:
+                return False, status, "retry limit reached", False
             record["attempts"] = attempt
             with self._lock:
                 self._persist_outbox()
             body = encode_payload(record["payload"])
             headers = build_headers(record["payload"], body, config["secret"])
             ok, status, error = post_json(
-                record["url"], body, headers, self.timeout
+                record["url"], body, headers, self._timeout_for(config)
             )
             if ok:
                 return True, status, None, False
             if self._stop.is_set():
                 return False, status, "dispatcher stopped", True
-            if attempt < self.max_attempts:
-                wait_for = self.backoff[min(attempt - 1, len(self.backoff) - 1)]
-                if self._stop.wait(wait_for):
-                    return False, status, "dispatcher stopped", True
-        return False, status, error, False
+            if attempt >= max_attempts:
+                return False, status, error, False
+            backoff = self._backoff_for(config)
+            wait_for = (
+                backoff[min(attempt - 1, len(backoff) - 1)] if backoff else 0
+            )
+            if self._stop.wait(wait_for):
+                return False, status, "dispatcher stopped", True
+            attempt += 1
 
     def _write_status(self, record: dict, ok: bool, status, error):
         payload = {

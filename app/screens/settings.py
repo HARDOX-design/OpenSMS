@@ -99,9 +99,9 @@ Builder.load_string('''
                 MDListItemHeadlineText:
                     text: "API Key"
                 MDListItemSupportingText:
-                    text: "Generate New API Key"
+                    text: "Replace this phone's API key"
                 MDListItemTertiaryText:
-                    text: "Old key will not work"
+                    text: "Other API keys keep working"
                 MDFabButton:
                     icon: "autorenew"
                     style: "small"
@@ -133,9 +133,17 @@ Builder.load_string('''
                     text: "Webhook URL"
                 MDListItemSupportingText:
                     text: "http:// or https://"
+
+            MDBoxLayout:
+                orientation: "vertical"
+                adaptive_height: True
+                padding: [dp(16), 0, dp(16), dp(8)]
                 MDTextField:
                     id: webhook_url_inp
                     mode: "outlined"
+                    size_hint_x: 1
+                    size_hint_y: None
+                    height: dp(56)
 
             MDListItem:
                 MDListItemLeadingIcon:
@@ -144,10 +152,18 @@ Builder.load_string('''
                     text: "Signing Secret"
                 MDListItemSupportingText:
                     text: "Optional HMAC-SHA256"
+
+            MDBoxLayout:
+                orientation: "vertical"
+                adaptive_height: True
+                padding: [dp(16), 0, dp(16), dp(8)]
                 MDTextField:
                     id: webhook_secret_inp
                     mode: "outlined"
                     password: True
+                    size_hint_x: 1
+                    size_hint_y: None
+                    height: dp(56)
 
             MDListItem:
                 MDListItemLeadingIcon:
