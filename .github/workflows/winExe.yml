@@ -4,11 +4,11 @@ name: 'Windows Executables'
 
 on:
 
-  #push:
-  #  branches:
-  #    - main
-  #  paths:
-  #    - 'app/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/**'
   workflow_dispatch:
 
 # Top-level permissions
@@ -29,10 +29,9 @@ jobs:
         id: 'git-checkout'
         uses: "actions/checkout@v4"
 
-      #- name: Install Dependencies
-      #  id: 'install_prereq'
-      #  run: |
-      #    # <command>
+      # 1. Install Mesa3D so the headless runner supports OpenGL 2.0+
+      - name: Setup Mesa3D for OpenGL 2.0+
+        uses: ssciwr/setup-mesa-dist-win@v3
 
       - name: Set version
         id: 'set_version'
@@ -62,26 +61,11 @@ jobs:
         run: |
           cd app
           python --version
-          pip install -r req_cli.txt
-          python -c "import sys; print(sys.executable)"
-
-      #- name: Configure Windows graphics backend
-      #  shell: pwsh
-      #  run: |
-      #    cd app
-      #    (Get-Content main.py -Raw).Replace(
-      #      "os.environ['KIVY_GL_BACKEND'] = 'sdl2'",
-      #      "os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'"
-      #    ) | Set-Content main.py -NoNewline
-      #    Get-Content main.py | Select-Object -First 5
-
-      #- name: Check Windows graphics environment
-      #  shell: pwsh
-      #  run: |
-      #    cd app
-      #    Get-CimInstance Win32_VideoController |
-      #      Format-Table Name, DriverVersion, Status
-      #    python -c "import os; os.environ['KIVY_GL_BACKEND']='angle_sdl2'; from kivy.core.window import Window; print(Window)"
+          pip install -r req_desktop.txt
+          python -c "
+          import kivy
+          print('Kivy:', kivy.__version__)
+          "
 
       - name: Test CLI imports
         shell: pwsh
@@ -95,27 +79,39 @@ jobs:
           cd app
           pyinstaller --clean --noconfirm desktopCli.spec
 
-      #- name: PyInstaller GUI
-      #  id: 'py_gui'
-      #  shell: pwsh
-      #  run: |
-      #    cd app
-      #    $env:KIVY_GL_BACKEND = "sdl2"
-      #    pyinstaller --clean --noconfirm desktopGui.spec
+      - name: PyInstaller GUI
+        id: 'py_gui'
+        shell: pwsh
+        run: |
+          cd app
+          pyinstaller --clean --noconfirm desktopGui.spec
 
-      #- name: Upload artifact
-      #  uses: actions/upload-pages-artifact@v3
-      #  with:
-      #    path: './flasher'
+      - name: Extract changelog for release
+        env:
+          VERSION: ${{ steps.set_version.outputs.app_version }}
+        run: |
+          python -c "
+          import os, re
+          ver = os.environ['VERSION'].lstrip('v')
+          with open('CHANGELOG.md', 'r', encoding='utf-8') as f:
+              text = f.read()
+          # Match from '### 1.1.0' until the next '### ' or '## ' heading
+          pattern = rf'(?m)^###\s+v?{re.escape(ver)}\b.*?\n(.*?)(?=^###?\s|\Z)'
+          match = re.search(pattern, text, re.DOTALL)
+          notes = match.group(1).strip() if match else f'Release {ver}'
+          with open('RELEASE_NOTES.md', 'w', encoding='utf-8') as f:
+              f.write(notes)
+          "
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.set_version.outputs.app_version }}
           name: ${{ steps.set_version.outputs.app_version }}
+          body_path: RELEASE_NOTES.md
           draft: false
           prerelease: true
-          generate_release_notes: true
+          generate_release_notes: false
           files: |
             app/dist/openSmsCli.exe
-          #app/dist/OpenSmsApp.exe
+            app/dist/OpenSmsApp.exe

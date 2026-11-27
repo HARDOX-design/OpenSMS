@@ -1,0 +1,2 @@
+# Development and test-only dependencies. Never shipped by buildozer.
+httpx

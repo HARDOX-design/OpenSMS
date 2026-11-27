@@ -19,7 +19,7 @@ uvicorn webhook_receiver:app --host 0.0.0.0 --port 8000 --reload
 ```bash
 curl -X POST http://localhost:8000/sms-hook \
   -H "Content-Type: application/json" \
-  -H "User-Agent: OpenSMS/1.1.0" \
+  -H "User-Agent: OpenSMS/1.2.0" \
   -H "X-OpenSMS-Event: sms.received" \
   -H "X-OpenSMS-Delivery: 6f1c2f5e-0d7a-4c55-9f0e-2b1c8b7f0a11" \
   -H "X-OpenSMS-Signature: sha256=dummy" \

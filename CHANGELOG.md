@@ -2,6 +2,12 @@
 
 ## Changes
 
+### 1.2.0
+- Add a bearer-authenticated remote Settings and control API: `GET /api/health`, `GET /api/status`, `GET/PUT /api/settings`, `POST /api/webhook/test`, and `POST /api/server/restart`, with Revision-based optimistic concurrency and human-readable validation errors.
+- Add named API keys with `sms:write` and `settings:write` Scopes, immediate revocation, and phone-key rotation that leaves proxy keys intact.
+- Make Webhook retry timeout, attempts, backoff, and Outbox capacity live Settings, so a longer proxy outage does not lose Inbound SMS; reject credentialed Webhook targets.
+- Keep the on-device UI consistent with remote changes through fresh read-merge-write saves; `GET /api/status` reports forwarding health and warnings.
+
 ### 1.1.0
 - Forward received SMS to a configurable webhook (Android), with optional HMAC-SHA256 signing, ordered delivery, retries and a persisted outbox. See the [README](./README.md#-receiving-sms-android).
 - Show the last webhook delivery result and a test button in Settings; log inbound SMS and delivery outcomes.

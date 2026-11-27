@@ -19,8 +19,8 @@ OpenSMS was outbound-only: a sticky foreground service on Android runs the FastA
 - A claimed spool file is acknowledged only after the Outbox has persisted the delivery. A crash between those steps can deliver the same SMS twice (at-least-once); a crash before the acknowledge loses nothing.
 - The webhook payload is a public contract. Multipart SMS is assembled into one Inbound SMS, and the sender is the raw originating address (it may be alphanumeric, not E.164).
 - `received_at` comes from the receiver, not from when the service drains the spool, so a late or recovered delivery reports the real receipt time.
-- Delivery is at-least-once with bounded retry, and the attempt count is persisted so a restart cannot exceed the documented limit.
+- Delivery is at-least-once with bounded retry, and the attempt count is persisted so a restart cannot exceed the attempt limit; the limit and backoff are live Settings since ADR 0002.
 - Redirects are treated as failures; a redirected POST is never counted as delivered.
-- The Outbox is capped at 100 pending Webhooks; the oldest is dropped (and logged) when full.
+- The Outbox is capped by the live Settings capacity (100 by default); the oldest is dropped (and logged) when full.
 - LAN targets require the phone and the receiver to share a network; the README states this.
 - The Settings "Send test" action runs in the UI process and posts directly, so it does not depend on the service being alive.
